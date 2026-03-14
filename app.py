@@ -220,26 +220,29 @@ BASE_SYSTEM_PROMPT = """You are a REAPER DAW music production assistant. You hel
 The current project state is provided at the start of each message. ALWAYS work incrementally - add to the existing project.
 {PLUGINS}
 ## CRITICAL RULES
-1. ALWAYS use get_chord_progression, get_bass_line, get_drum_pattern, and get_melody to generate notes. NEVER compute MIDI note numbers yourself — the music theory tools handle correct notes, voicings, and humanization.
-2. To add MIDI notes, you MUST use add_midi_notes_batch_beats. Pass the notes array from the music theory tools directly.
-3. To create MIDI items, use create_midi_item_beats.
-4. NEVER use add_midi_note (singular). It does not exist in your tools.
-5. NEVER use duplicate_item to repeat patterns. Instead, generate all notes for all bars directly.
-6. For instruments, use track_fx_add_by_name with the EXACT plugin name from the available plugins list.
+1. For ORIGINAL compositions, ALWAYS use get_chord_progression, get_bass_line, get_drum_pattern, and get_melody to generate notes — the music theory tools handle correct notes, voicings, and humanization.
+2. For SPECIFIC/KNOWN songs (e.g. "play Happy Birthday", "play Twinkle Twinkle Little Star"), you MUST write the MIDI notes yourself using your knowledge of the melody. Use the correct tempo, time signature, and key for that song. Use the MIDI REFERENCE section for pitch numbers. Pass notes directly to add_midi_notes_batch_beats.
+3. To add MIDI notes, you MUST use add_midi_notes_batch_beats. Pass the notes array directly.
+4. To create MIDI items, use create_midi_item_beats.
+5. NEVER use add_midi_note (singular). It does not exist in your tools.
+6. NEVER use duplicate_item to repeat patterns. Instead, generate all notes for all bars directly.
+7. For instruments, use track_fx_add_by_name with the EXACT plugin name from the available plugins list.
+8. When adding new tracks, ALWAYS append to the end by calling insert_track() with NO index argument (or index=current track count). NEVER insert at a middle index unless the user explicitly asks to insert between specific tracks (e.g. "insert between track 2 and 3"). Inserting at a middle index shifts all subsequent track indices and will break references to existing tracks.
+9. NEVER modify, overwrite, or delete existing tracks unless the user explicitly asks to edit a specific track (e.g. "edit track 2", "change the bass track").
 
 ## COMPOSING WORKFLOW (follow this order)
 1. **set_tempo(bpm)** — choose appropriate tempo for genre
 2. **get_chord_progression(genre, key, bars)** — get chord voicings. Save the returned notes for the chords/pads track.
 3. **For each layer, repeat:**
-   a. insert_track(index, name) — create the track
+   a. insert_track(name) — create the track (always appends to end)
    b. track_fx_add_by_name(track_index, fx_name) — add instrument plugin
    b2. Configure synth parameters with track_fx_set_param (see SYNTH CONFIGURATION)
    c. create_midi_item_beats(track_index, position_beats=0, length_beats=TOTAL_BEATS, tempo=BPM)
    d. Get notes from the appropriate music theory tool:
       - **Drums**: get_drum_pattern(genre, bars) — humanized drums with fills
-      - **Bass**: get_bass_line(key, genre, bars) — bass following chord roots
+      - **Bass**: get_bass_line(key, genre, bars, progression=PROGRESSION_STRING) — pass the progression string from step 2 so bass follows the same chords
       - **Chords/Pads**: use the notes from get_chord_progression (step 2)
-      - **Melody**: get_melody(key, genre, bars, density) — chord-tone melody
+      - **Melody/Piano**: get_melody(key, genre, bars, density, progression=PROGRESSION_STRING) — pass the progression string from step 2
    e. add_midi_notes_batch_beats(track_index, item_index=0, tempo=BPM, notes=NOTES_FROM_TOOL)
 4. **FX chain**: Add ReaEQ + ReaComp on every track. Add ReaLimit on the master.
 
@@ -266,7 +269,7 @@ After adding a synth plugin with track_fx_add_by_name, ALWAYS configure its para
 
 ## PRODUCTION GUIDELINES
 - **Drums**: Use MT-PowerDrumKit or ReaSynth. The drum pattern tool provides kick, snare, hi-hats with ghost notes and fills.
-- **Bass**: Instrument in octave 2-3 range. The bass tool follows chord roots with rhythmic variation.
+- **Bass**: Use 4Front Bass Module. Instrument in octave 2-3 range. The bass tool follows chord roots with rhythmic variation.
 - **Chords/Pads**: Use Vital or Upright Piano. Chord progression tool provides voice-led voicings with strummed feel.
 - **Melody/Lead**: The melody tool uses chord tones on strong beats and scale tones on weak beats. Use density="sparse" for ambient, "medium" for standard, "dense" for busy.
 - **Timing**: Convert "seconds" requests to bars (e.g. 30 sec at 120 BPM = 16 bars = 64 beats).
@@ -274,7 +277,7 @@ After adding a synth plugin with track_fx_add_by_name, ALWAYS configure its para
 
 ## GENRE DEFAULTS
 - **Hip-hop/Trap**: 70-90 BPM, key of minor (Cm, Am, Dm), dense hi-hats
-- **Lo-fi**: 75-85 BPM, key of major (C, F, Eb), jazzy chords, sparse melody
+- **Lo-fi**: 75-85 BPM, key of major (C, F, Eb), sparse melody
 - **Pop**: 100-120 BPM, key of major (C, G, D), medium density melody
 - **R&B**: 85-95 BPM, key of major (Eb, Ab, Bb), sparse melody
 - **Rock**: 110-140 BPM, key of major or minor (E, A, G), dense melody
@@ -291,8 +294,26 @@ Be concise. Describe what you built briefly — list the progression, layers, ke
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+TOOL_DESCRIPTIONS = {
+    "set_tempo": "Setting tempo...",
+    "insert_track": "Creating new track...",
+    "track_fx_add_by_name": "Loading instrument plugin...",
+    "track_fx_set_param": "Configuring synth parameters...",
+    "create_midi_item_beats": "Creating MIDI clip...",
+    "add_midi_notes_batch_beats": "Adding notes...",
+    "get_chord_progression": "Generating chord progression...",
+    "get_bass_line": "Generating bass line...",
+    "get_drum_pattern": "Generating drum pattern...",
+    "get_melody": "Generating melody...",
+    "add_eq": "Adding EQ...",
+    "add_compressor": "Adding compressor...",
+    "add_limiter": "Adding limiter...",
+    "play": "Starting playback...",
+    "save_project": "Saving project...",
+}
 
-async def run_agentic_loop(client, messages, tool_schemas, status_callback=None):
+
+async def run_agentic_loop(client, messages, tool_schemas, status_callback=None, chat_callback=None):
     """Run the OpenAI tool-calling loop. Modifies messages list in-place."""
     response = await client.chat.completions.create(
         model=MODEL,
@@ -315,6 +336,9 @@ async def run_agentic_loop(client, messages, tool_schemas, status_callback=None)
                 args = {}
             if status_callback:
                 status_callback(f"-> {name}")
+            friendly = TOOL_DESCRIPTIONS.get(name, f"Running {name}...")
+            if chat_callback:
+                chat_callback(friendly)
             print(f"[Tool] {name}({json.dumps(args)[:200]})")
 
             result = await execute_tool(name, args)
@@ -441,6 +465,7 @@ class ReaperAIApp:
             response = await run_agentic_loop(
                 self.client, self.messages, self.tool_schemas,
                 status_callback=self.set_status,
+                chat_callback=lambda msg: self.add_chat_message(msg, COLOR_STATUS),
             )
 
             self.add_chat_message(response, COLOR_AI, prefix="AI: ")

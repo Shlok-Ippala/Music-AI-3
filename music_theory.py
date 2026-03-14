@@ -302,16 +302,44 @@ def get_chord_progression(genre: str, key: str, bars: int) -> dict:
     }
 
 
-def get_bass_line(key: str, genre: str, bars: int) -> dict:
+def _parse_progression(prog_str: str) -> list[tuple[int, str]]:
+    """Parse a progression string like 'Dmaj7 | Bmin7 | Emin7 | Amaj7' into (root_semitone, quality) tuples."""
+    REVERSE_NOTE = {
+        "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+        "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8, "Ab": 8,
+        "A": 9, "A#": 10, "Bb": 10, "B": 11,
+    }
+    result = []
+    for chord_str in prog_str.split("|"):
+        chord_str = chord_str.strip()
+        if not chord_str:
+            continue
+        # Extract note name (1-2 chars) and quality
+        if len(chord_str) > 1 and chord_str[1] in ("#", "b"):
+            note_name = chord_str[:2]
+            quality = chord_str[2:] or "maj"
+        else:
+            note_name = chord_str[0]
+            quality = chord_str[1:] or "maj"
+        root = REVERSE_NOTE.get(note_name, 0)
+        # Normalize quality
+        if quality not in CHORD_TYPES:
+            quality = "maj"
+        result.append((root, quality))
+    return result
+
+
+def get_bass_line(key: str, genre: str, bars: int, progression: str = "") -> dict:
     """Generate a bass line that follows the chord progression for a genre.
 
     Creates rhythmically varied bass notes in the low octave range,
-    matching the chord roots with passing tones and approach notes.
+    matching the chord roots with passing tones, chord tones, and approach notes.
 
     Args:
         key: Musical key root note (C, C#, D, Eb, E, F, F#, G, Ab, A, Bb, B).
         genre: Music genre (pop, lofi, hiphop, rnb, rock).
         bars: Total number of bars to generate.
+        progression: Optional progression string from get_chord_progression (e.g. "Dmaj7 | Bmin7 | Emin7 | Amaj7"). When provided, bass follows these exact chords instead of picking its own random progression.
 
     Returns:
         Object with notes list for add_midi_notes_batch_beats.
@@ -322,14 +350,23 @@ def get_bass_line(key: str, genre: str, bars: int) -> dict:
     if genre in ("hip-hop", "hip_hop", "trap"):
         genre = "hiphop"
 
-    progs = PROGRESSIONS.get(genre, PROGRESSIONS["pop"])
-    prog = random.choice(progs)
     root_semitone = _root_from_key(key)
     is_minor = GENRE_MINOR.get(genre, False)
 
+    # Use parsed progression if provided, otherwise fall back to random
+    if progression:
+        parsed = _parse_progression(progression)
+        # Build prog as (root_semitone, quality) — absolute, not degree-based
+        use_absolute = True
+        prog = parsed
+    else:
+        use_absolute = False
+        progs = PROGRESSIONS.get(genre, PROGRESSIONS["pop"])
+        prog = random.choice(progs)
+
     beats_per_bar = 4
-    bars_per_chord = max(1, bars // len(prog))
     chords_in_prog = len(prog)
+    bars_per_chord = max(1, bars // chords_in_prog)
 
     notes = []
     prev_vel = None
@@ -339,54 +376,129 @@ def get_bass_line(key: str, genre: str, bars: int) -> dict:
         patterns = [
             [(0, 1.5), (2, 1.0), (3.25, 0.5)],
             [(0, 1.0), (1.5, 0.75), (2.5, 1.0)],
+            [(0, 1.0), (2, 0.75), (3.5, 0.5)],          # pattern with space
+            [(0, 1.5), (2, 1.5), (3.75, 0.25)],          # pickup note
         ]
     elif genre == "lofi":
         patterns = [
             [(0, 1.5), (2, 1.5)],
             [(0, 1.0), (1.5, 0.5), (2, 1.5)],
             [(0, 2.0), (2.5, 1.0)],
+            [(0, 0.75), (1, 0.75), (2, 1.5)],            # syncopated
+            [(0, 1.5), (2.5, 0.75), (3.5, 0.5)],         # dotted feel
         ]
     elif genre == "rnb":
         patterns = [
             [(0, 1.0), (1.5, 0.75), (2.5, 1.0)],
             [(0, 1.5), (2, 0.75), (3, 0.75)],
+            [(0, 1.0), (1.5, 0.5), (2.5, 0.75), (3.5, 0.5)],
         ]
     else:  # pop, rock
         patterns = [
             [(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)],
             [(0, 1.5), (2, 1.5)],
             [(0, 1.0), (1, 0.5), (2, 1.0), (3, 0.5)],
+            [(0, 1.0), (1.5, 0.5), (2, 1.0), (3.5, 0.5)],
         ]
 
     for bar in range(bars):
         chord_idx = (bar // bars_per_chord) % chords_in_prog
-        degree, quality = prog[chord_idx]
-        chord_root = root_semitone + _degree_to_semitones(degree, is_minor)
+
+        if use_absolute:
+            chord_root_semi = prog[chord_idx][0]
+            quality = prog[chord_idx][1]
+        else:
+            degree, quality = prog[chord_idx]
+            chord_root_semi = root_semitone + _degree_to_semitones(degree, is_minor)
 
         # Bass in octave 2 (MIDI 36-47)
-        bass_root = 36 + (chord_root % 12)
-        fifth = bass_root + 7
+        bass_root = 36 + (chord_root_semi % 12)
+
+        # Build chord tone options
+        intervals = CHORD_TYPES.get(quality, CHORD_TYPES["maj"])
+        third = bass_root + (intervals[1] if len(intervals) > 1 else 4)
+        fifth = bass_root + (intervals[2] if len(intervals) > 2 else 7)
+        octave_up = bass_root + 12
+        octave_down = bass_root - 12 if bass_root - 12 >= 28 else bass_root
+
+        # Keep fifth in range
         if fifth > 48:
             fifth -= 12
+
+        # Scale passing tones near the root
+        scale_name = GENRE_SCALES.get(genre, "major")
+        scale_intervals = SCALE_TYPES.get(scale_name, SCALE_TYPES["major"])
+        passing_tones = []
+        for si in scale_intervals:
+            p = bass_root + si
+            if 28 <= p <= 52 and p != bass_root and p != fifth:
+                passing_tones.append(p)
 
         beat_start = bar * beats_per_bar
         pattern = random.choice(patterns)
 
+        # Occasionally skip a note for breathing room
+        skip_idx = -1
+        if len(pattern) > 2 and random.random() < 0.15:
+            skip_idx = random.randint(1, len(pattern) - 1)
+
         for i, (offset, length) in enumerate(pattern):
-            # Use root primarily, fifth on some passing notes
+            if i == skip_idx:
+                continue
+
+            # Note selection weighted by position
             if i == 0:
-                pitch = bass_root
-            elif i == len(pattern) - 1 and random.random() < 0.3:
-                # Approach note: one semitone below next chord root
-                next_chord_idx = ((bar + 1) // bars_per_chord) % chords_in_prog
-                next_degree, _ = prog[next_chord_idx]
-                next_root = root_semitone + _degree_to_semitones(next_degree, is_minor)
-                next_bass = 36 + (next_root % 12)
-                pitch = next_bass - 1  # chromatic approach from below
-            elif random.random() < 0.4:
-                pitch = fifth
+                # Beat 1: always root (or occasional octave for energy)
+                if random.random() < 0.12:
+                    pitch = octave_up if octave_up <= 52 else bass_root
+                else:
+                    pitch = bass_root
+            elif i == len(pattern) - 1:
+                # Last note: approach note if crossing chord boundary
+                next_bar = bar + 1
+                crosses_boundary = (next_bar // bars_per_chord) != (bar // bars_per_chord)
+                if crosses_boundary and next_bar < bars and random.random() < 0.4:
+                    next_chord_idx = (next_bar // bars_per_chord) % chords_in_prog
+                    if use_absolute:
+                        next_root_semi = prog[next_chord_idx][0]
+                    else:
+                        next_deg, _ = prog[next_chord_idx]
+                        next_root_semi = root_semitone + _degree_to_semitones(next_deg, is_minor)
+                    next_bass = 36 + (next_root_semi % 12)
+                    # Chromatic approach from below or above
+                    pitch = next_bass - 1 if random.random() < 0.7 else next_bass + 1
+                elif random.random() < 0.3:
+                    pitch = fifth
+                elif random.random() < 0.2 and passing_tones:
+                    pitch = random.choice(passing_tones)
+                else:
+                    pitch = bass_root
+            elif offset >= 2.0:
+                # Beat 3 area: prefer fifth or third
+                r = random.random()
+                if r < 0.4:
+                    pitch = fifth
+                elif r < 0.6:
+                    pitch = third if 28 <= third <= 52 else fifth
+                elif r < 0.75 and passing_tones:
+                    pitch = random.choice(passing_tones)
+                else:
+                    pitch = bass_root
             else:
-                pitch = bass_root
+                # Weak beats: varied choices
+                r = random.random()
+                if r < 0.3:
+                    pitch = bass_root
+                elif r < 0.5:
+                    pitch = fifth
+                elif r < 0.65:
+                    pitch = third if 28 <= third <= 52 else bass_root
+                elif r < 0.8 and passing_tones:
+                    pitch = random.choice(passing_tones)
+                elif r < 0.9:
+                    pitch = octave_up if octave_up <= 52 else bass_root
+                else:
+                    pitch = octave_down
 
             vel = _humanize_velocity(90 if offset == 0 else 78, prev_vel)
             prev_vel = vel
@@ -550,7 +662,7 @@ def get_drum_pattern(genre: str, bars: int) -> dict:
     }
 
 
-def get_melody(key: str, genre: str, bars: int, density: str = "medium") -> dict:
+def get_melody(key: str, genre: str, bars: int, density: str = "medium", progression: str = "") -> dict:
     """Generate a melody line that fits the chord progression and scale.
 
     Uses chord tones on strong beats and scale passing tones on weak beats.
@@ -561,6 +673,10 @@ def get_melody(key: str, genre: str, bars: int, density: str = "medium") -> dict
         genre: Music genre (pop, lofi, hiphop, rnb, rock).
         bars: Total number of bars to generate.
         density: Note density - sparse, medium, or dense.
+        progression: Optional progression string from get_chord_progression
+            (e.g. "Dmaj7 | Bmin7 | Emin7 | Amaj7"). When provided, melody
+            follows these exact chords instead of picking its own random
+            progression.
 
     Returns:
         Object with notes list for add_midi_notes_batch_beats.
@@ -571,16 +687,24 @@ def get_melody(key: str, genre: str, bars: int, density: str = "medium") -> dict
     if genre_clean in ("hip-hop", "hip_hop", "trap"):
         genre_clean = "hiphop"
 
-    progs = PROGRESSIONS.get(genre_clean, PROGRESSIONS["pop"])
-    prog = random.choice(progs)
     root_semitone = _root_from_key(key)
     is_minor = GENRE_MINOR.get(genre_clean, False)
+
+    # Use parsed progression if provided, otherwise fall back to random
+    if progression:
+        parsed = _parse_progression(progression)
+        use_absolute = True
+        prog = parsed
+    else:
+        use_absolute = False
+        progs = PROGRESSIONS.get(genre_clean, PROGRESSIONS["pop"])
+        prog = random.choice(progs)
     scale_name = GENRE_SCALES.get(genre_clean, "major")
 
     # Get scale pitches in melody range (octave 5, MIDI 72-84)
     scale_pitches = _get_scale_pitches(root_semitone, scale_name, 4, 2)
     # Filter to comfortable melody range
-    scale_pitches = [p for p in scale_pitches if 60 <= p <= 84]
+    scale_pitches = [p for p in scale_pitches if 65 <= p <= 79]
 
     beats_per_bar = 4
     bars_per_chord = max(1, bars // len(prog))
@@ -602,13 +726,17 @@ def get_melody(key: str, genre: str, bars: int, density: str = "medium") -> dict
 
     for bar in range(bars):
         chord_idx = (bar // bars_per_chord) % len(prog)
-        degree, quality = prog[chord_idx]
-        chord_root = root_semitone + _degree_to_semitones(degree, is_minor)
+        if use_absolute:
+            chord_root = prog[chord_idx][0]
+            quality = prog[chord_idx][1]
+        else:
+            degree, quality = prog[chord_idx]
+            chord_root = root_semitone + _degree_to_semitones(degree, is_minor)
         chord_root_midi = 60 + (chord_root % 12)
         chord_pitches = _build_chord_pitches(chord_root_midi, quality)
         # Also include octave above
         chord_pitches_extended = chord_pitches + [p + 12 for p in chord_pitches]
-        chord_pitches_in_range = [p for p in chord_pitches_extended if 60 <= p <= 84]
+        chord_pitches_in_range = [p for p in chord_pitches_extended if 65 <= p <= 79]
 
         beat_start = bar * beats_per_bar
         num_notes = random.randint(*notes_per_bar_range)
@@ -629,14 +757,18 @@ def get_melody(key: str, genre: str, bars: int, density: str = "medium") -> dict
                 pitch = min(chord_pitches_in_range, key=lambda p: abs(p - prev_pitch))
             else:
                 # Scale tone, step-wise motion from prev_pitch
-                nearby = [p for p in scale_pitches if abs(p - prev_pitch) <= 4]
+                nearby = [p for p in scale_pitches if abs(p - prev_pitch) <= 2]
                 if nearby:
-                    pitch = random.choice(nearby)
+                    # Favor stepwise motion — pick closest scale tone
+                    pitch = min(nearby, key=lambda p: abs(p - prev_pitch))
+                    # Small chance of picking a different nearby note for variety
+                    if len(nearby) > 1 and random.random() < 0.3:
+                        pitch = random.choice(nearby)
                 else:
                     pitch = min(scale_pitches, key=lambda p: abs(p - prev_pitch))
 
             # Occasionally leap (for interest)
-            if random.random() < 0.15 and chord_pitches_in_range:
+            if random.random() < 0.05 and chord_pitches_in_range:
                 pitch = random.choice(chord_pitches_in_range)
 
             length = random.choice(length_choices)
