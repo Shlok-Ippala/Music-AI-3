@@ -2,8 +2,8 @@
   "mcpServers": {
     "reaper": {
       "type": "stdio",
-      "command": "python",
-      "args": ["C:/Users/shlok/Personal Projects/Music AI 3/reaper-mcp/reaper_mcp_server.py"]
+      "command": "python3",
+      "args": ["/Users/aadichauhan/Music-AI-3/reaper-mcp/reaper_mcp_server.py"]
     }
   }
 }

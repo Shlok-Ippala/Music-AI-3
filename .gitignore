@@ -1,0 +1,20 @@
+# Environment & secrets
+.env
+.session.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Electron build output
+frontend/dist-electron/
+frontend/release/
+
+# Misc
+.DS_Store
+*.log

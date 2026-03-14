@@ -1,2 +1,2 @@
-anthropic>=0.30.0
+backboard-sdk>=1.5.5
 httpx>=0.25.0
