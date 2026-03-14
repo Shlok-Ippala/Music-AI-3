@@ -677,6 +677,12 @@ local function SetTempo(bpm)
     return {ok = true}
 end
 
+local function SetTimeSignature(numerator, denominator)
+    local bpm = reaper.Master_GetTempo()
+    reaper.SetTempoTimeSigMarker(0, -1, -1, -1, -1, bpm, numerator, denominator, false)
+    return {ok = true}
+end
+
 local function GetTimeSignature()
     -- GetProjectTimeSignature2 returns: bpm (tempo), bpi (beats per measure = numerator)
     local bpm, bpi = reaper.GetProjectTimeSignature2(0)
@@ -848,6 +854,7 @@ DSL_FUNCTIONS = {
     GetTempo = GetTempo,
     SetTempo = SetTempo,
     GetTimeSignature = GetTimeSignature,
+    SetTimeSignature = SetTimeSignature,
 
     -- Project summary
     GetProjectSummary = GetProjectSummary

@@ -1294,7 +1294,9 @@ async def set_time_signature(numerator: int, denominator: int) -> dict:
     Returns:
         Object with success status.
     """
-    return await reaper_call("SetTimeSignature", numerator, denominator)
+    bpm_result = await reaper_call("Master_GetTempo")
+    bpm = bpm_result.get("ret", 120)
+    return await reaper_call("SetTempoTimeSigMarker", 0, -1, -1, -1, -1, bpm, numerator, denominator, False)
 
 
 @mcp.tool()

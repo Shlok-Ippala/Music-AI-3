@@ -15,7 +15,12 @@
       "mcp__reaper__get_all_tracks",
       "mcp__reaper__set_track_name",
       "mcp__reaper__add_midi_notes_batch",
-      "mcp__reaper__delete_item"
+      "mcp__reaper__delete_item",
+      "mcp__reaper__set_tempo",
+      "mcp__reaper__set_time_signature",
+      "mcp__reaper__track_fx_add_by_name",
+      "mcp__reaper__set_cursor_position",
+      "mcp__reaper__play"
     ]
   },
   "enableAllProjectMcpServers": true,

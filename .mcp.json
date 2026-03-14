@@ -3,7 +3,7 @@
     "reaper": {
       "type": "stdio",
       "command": "python",
-      "args": ["C:/Users/shlok/Personal Projects/Music AI/reaper-mcp/reaper_mcp_server.py"]
+      "args": ["C:/Users/shlok/Personal Projects/Music AI 3/reaper-mcp/reaper_mcp_server.py"]
     }
   }
 }
