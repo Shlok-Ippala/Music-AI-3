@@ -20,7 +20,11 @@
       "mcp__reaper__set_time_signature",
       "mcp__reaper__track_fx_add_by_name",
       "mcp__reaper__set_cursor_position",
-      "mcp__reaper__play"
+      "mcp__reaper__play",
+      "WebSearch",
+      "mcp__backboard-docs__search_docs",
+      "mcp__backboard-docs__list_pages",
+      "mcp__backboard-docs__get_page"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -1,2 +1,3 @@
-anthropic>=0.30.0
+backboard-sdk==1.5.3
 httpx>=0.25.0
+python-toon>=0.1.0
