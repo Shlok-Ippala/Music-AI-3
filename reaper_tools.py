@@ -1020,6 +1020,62 @@ async def add_midi_notes_batch(
 
 
 @tool
+async def create_midi_item_beats(track_index: int, position_beats: float, length_beats: float, tempo: float) -> dict:
+    """
+    Create an empty MIDI item on a track using beat positions instead of seconds.
+
+    Args:
+        track_index: Track index (0-based).
+        position_beats: Start position in beats (0 = start of project).
+        length_beats: Length in beats.
+        tempo: Tempo in BPM used to convert beats to seconds.
+
+    Returns:
+        Object with item info.
+    """
+    beat_duration = 60.0 / tempo
+    position_sec = round(position_beats * beat_duration, 4)
+    length_sec = round(length_beats * beat_duration, 4)
+    return await reaper_call("CreateMIDIItem", track_index, position_sec, position_sec + length_sec)
+
+
+@tool
+async def add_midi_notes_batch_beats(
+    track_index: int,
+    item_index: int,
+    tempo: float,
+    notes: list
+) -> dict:
+    """
+    Add multiple MIDI notes to an item using beat positions instead of seconds.
+
+    Args:
+        track_index: Track index (0-based).
+        item_index: Item index (0-based).
+        tempo: Tempo in BPM used to convert beats to seconds.
+        notes: List of note dicts with keys: pitch (MIDI number), start_beat (beat position from item start), length_beats (duration in beats), velocity (0-127), channel (optional, default 0).
+
+    Returns:
+        Object with count of notes added.
+    """
+    beat_duration = 60.0 / tempo
+    results = []
+    for note in notes:
+        result = await reaper_call(
+            "InsertMIDINote",
+            track_index,
+            item_index,
+            note.get("pitch", 60),
+            round(note.get("start_beat", 0) * beat_duration, 4),
+            round(note.get("length_beats", 1) * beat_duration, 4),
+            note.get("velocity", 100),
+            note.get("channel", 0)
+        )
+        results.append(result)
+    return {"ok": True, "notes_added": len(results), "results": results}
+
+
+@tool
 async def get_midi_notes(track_index: int, item_index: int) -> dict:
     """
     Get all MIDI notes from an item.

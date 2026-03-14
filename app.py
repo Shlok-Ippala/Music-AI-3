@@ -2,8 +2,8 @@
 """
 REAPER AI Assistant
 
-Standalone app that uses Backboard.io to control REAPER DAW.
-Two-LLM pipeline: Composer (generates TOON music specs) + Executor (calls REAPER tools).
+Side panel overlay using Dear PyGui + Backboard.io to control REAPER DAW.
+Single unified LLM with tool-calling for all music production tasks.
 """
 
 import os
@@ -12,10 +12,13 @@ import json
 import asyncio
 import inspect
 import re
+import threading
+import ctypes
+import queue
 from pathlib import Path
 
+import dearpygui.dearpygui as dpg
 from backboard import BackboardClient
-from toon import encode as toon_encode, decode as toon_decode
 
 import reaper_tools
 
@@ -45,7 +48,6 @@ TYPE_MAP = {
 
 
 def _parse_arg_docs(docstring: str) -> dict:
-    """Parse Google-style docstring Args section into a dict of param_name -> description."""
     arg_docs = {}
     in_args = False
     current_param = None
@@ -53,7 +55,6 @@ def _parse_arg_docs(docstring: str) -> dict:
 
     for line in docstring.splitlines():
         stripped = line.strip()
-
         if stripped == "Args:":
             in_args = True
             continue
@@ -62,10 +63,8 @@ def _parse_arg_docs(docstring: str) -> dict:
                 arg_docs[current_param] = " ".join(current_desc_lines).strip()
             in_args = False
             continue
-
         if not in_args:
             continue
-
         match = re.match(r"^(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$", stripped)
         if match:
             if current_param:
@@ -77,57 +76,47 @@ def _parse_arg_docs(docstring: str) -> dict:
 
     if current_param:
         arg_docs[current_param] = " ".join(current_desc_lines).strip()
-
     return arg_docs
 
 
 def _get_json_type(annotation):
-    """Convert a Python type annotation to a JSON schema type dict."""
     if annotation is inspect.Parameter.empty:
         return {"type": "string"}
-
     origin = getattr(annotation, "__origin__", None)
     if origin is list:
         args = getattr(annotation, "__args__", None)
         if args:
             return {"type": "array", "items": {"type": TYPE_MAP.get(args[0], "string")}}
         return {"type": "array"}
-
     return {"type": TYPE_MAP.get(annotation, "string")}
 
 
-# Tools to skip (least essential, keeps us under the 128 tool limit)
-SKIP_TOOLS = {"zoom_to_selection", "zoom_to_project"}
+SKIP_TOOLS = {
+    "zoom_to_selection", "zoom_to_project",
+    "create_midi_item", "add_midi_notes_batch",  # replaced by beat-based versions
+    "add_midi_note",  # force LLM to use batch
+    "duplicate_item",  # force LLM to generate all notes directly
+}
 
 
 def generate_tool_schemas() -> list:
-    """Generate OpenAI-format tool schemas for Backboard from registered REAPER tool functions."""
     schemas = []
-
     for name, func in reaper_tools.TOOLS.items():
         if name in SKIP_TOOLS:
             continue
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
-
         description = re.split(r"\n\s*(Args|Returns|Raises|Note|Example):", doc)[0].strip()
-
         arg_docs = _parse_arg_docs(doc)
-
         properties = {}
         required = []
-
         for param_name, param in sig.parameters.items():
             prop = _get_json_type(param.annotation)
-
             if param_name in arg_docs:
                 prop["description"] = arg_docs[param_name]
-
             properties[param_name] = prop
-
             if param.default is inspect.Parameter.empty:
                 required.append(param_name)
-
         schema = {
             "type": "function",
             "function": {
@@ -141,14 +130,12 @@ def generate_tool_schemas() -> list:
             },
         }
         schemas.append(schema)
-
     return schemas
 
 
 # --- Tool execution ---
 
 async def execute_tool(tool_name: str, tool_input: dict) -> dict:
-    """Execute a REAPER tool by name with the given input."""
     func = reaper_tools.TOOLS.get(tool_name)
     if func is None:
         return {"ok": False, "error": f"Unknown tool: {tool_name}"}
@@ -158,323 +145,376 @@ async def execute_tool(tool_name: str, tool_input: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-# --- System prompts ---
+# --- System prompt ---
 
-COMPOSER_SYSTEM_PROMPT = """You are a music composition assistant. Given a user's request, generate a complete musical specification in TOON format (Token-Oriented Object Notation).
+SYSTEM_PROMPT = """You are a REAPER DAW music production assistant. You help producers build tracks incrementally.
 
-CRITICAL: Include EVERY note of the entire song. Do not abbreviate, skip sections, or say "repeat". Write out every single note.
+The current project state is provided at the start of each message. ALWAYS work incrementally - add to the existing project.
 
-Output ONLY the TOON specification, no other text. Use this exact format:
+## CRITICAL RULES
+1. To add MIDI notes, you MUST use add_midi_notes_batch_beats. Generate ALL notes in a SINGLE call.
+2. To create MIDI items, use create_midi_item_beats.
+3. NEVER use add_midi_note (singular). It does not exist in your tools.
+4. NEVER use duplicate_item to repeat patterns. Instead, generate all notes for all bars directly.
+5. For instruments, use track_fx_add_by_name with "ReaSynth" (for synths) or standard names.
 
-tempo: [BPM]
-time_sig: [e.g. 4/4 or 3/4]
-track: [track name]
-instrument: [instrument name, e.g. Upright Piano]
-notes[N](pitch,start,length,velocity):
-[MIDI pitch],[start time in beats],[duration in beats],[velocity 0-127]
-[next note...]
-...
+## ADDING NOTES - STEP BY STEP
+1. set_tempo(bpm) - set the project tempo
+2. insert_track(index, name) - create the track
+3. track_fx_add_by_name(track_index, fx_name) - add instrument
+4. create_midi_item_beats(track_index, position_beats=0, length_beats=TOTAL_BEATS, tempo=BPM)
+5. add_midi_notes_batch_beats(track_index, item_index=0, tempo=BPM, notes=[...all notes...])
 
-Rules:
-- Use standard MIDI pitch numbers (60 = middle C / C4, 62 = D4, 64 = E4, 65 = F4, 67 = G4, 69 = A4, 71 = B4, 72 = C5)
-- Start times are in beats from the beginning (beat 0)
-- Lengths are in beats (1 = quarter note, 0.5 = eighth note, 2 = half note, etc.)
-- Velocity range: 60-100 for normal playing
-- N must equal the exact number of note rows
-- Include the COMPLETE song from start to finish"""
+Each note in the notes array: (pitch, start_beat, length_beats, velocity, channel)
+Example - 4-bar kick (four-on-the-floor at 120 BPM):
+add_midi_notes_batch_beats(track_index=0, item_index=0, tempo=120, notes=[
+  (pitch=36, start_beat=0, length_beats=0.5, velocity=95),
+  (pitch=36, start_beat=1, length_beats=0.5, velocity=95),
+  (pitch=36, start_beat=2, length_beats=0.5, velocity=95),
+  (pitch=36, start_beat=3, length_beats=0.5, velocity=95),
+  ... (pitch=36, start_beat=4 through 15, same pattern)
+])
 
-EXECUTOR_SYSTEM_PROMPT = """You are a REAPER DAW assistant that executes music production tasks.
-You have access to tools for creating tracks, adding MIDI notes, managing FX, mixing, and transport.
+## MIDI REFERENCE
+Notes: C4=60, D4=62, E4=64, F4=65, G4=67, A4=69, B4=71, C5=72. Octave=+12.
+Drums (channel 9): Kick=36, Snare=38, Closed HH=42, Open HH=46, Clap=39, Crash=49, Ride=51
+Beats: whole=4, half=2, quarter=1, eighth=0.5, sixteenth=0.25
+Chords from root: Major=(0,4,7) Minor=(0,3,7) Maj7=(0,4,7,11) Min7=(0,3,7,10) Dom7=(0,4,7,10)
 
-IMPORTANT: When adding MIDI notes, ALWAYS use add_midi_notes_batch to add ALL notes in a single call.
-NEVER use add_midi_note individually for multiple notes — it is too slow and error-prone.
-
-When given a detailed music specification, execute it precisely:
-1. Set the tempo with set_tempo
-2. Create the track with insert_track, then add the instrument with track_fx_add_by_name
-3. Create a MIDI item with create_midi_item
-4. Add ALL notes in ONE call using add_midi_notes_batch
-5. Set cursor to 0 and play
-
-For non-music tasks, use the appropriate tools directly.
-Be concise in your responses."""
-
-# Keywords that suggest the user wants music composition
-COMPOSITION_KEYWORDS = [
-    "melody", "song", "music", "tune", "play me", "compose", "create a",
-    "make a", "write a", "happy birthday", "twinkle", "jingle", "chord",
-    "progression", "beat", "drum pattern", "bass line", "riff",
-]
-
-
-def needs_composition(user_message: str) -> bool:
-    """Check if the user's message requires the composer LLM."""
-    lower = user_message.lower()
-    return any(keyword in lower for keyword in COMPOSITION_KEYWORDS)
-
-
-# --- Composer LLM ---
-
-async def compose_music_spec(client: BackboardClient, composer_thread_id: str, user_message: str) -> str:
-    """Use the composer LLM to generate a TOON music specification."""
-    print("  [Composing music specification...]")
-
-    response = await client.add_message(
-        thread_id=composer_thread_id,
-        content=user_message,
-        stream=False,
-    )
-
-    toon_spec = response.content
-    print(f"  [Composer output: {len(toon_spec)} chars]")
-    return toon_spec
-
-
-def parse_toon_spec(toon_spec: str) -> dict:
-    """Parse a TOON music specification into a structured dict."""
-    result = {
-        "tempo": 120,
-        "time_sig": "4/4",
-        "track": "Piano",
-        "instrument": "Upright Piano",
-        "notes": [],
-    }
-
-    lines = toon_spec.strip().splitlines()
-    in_notes = False
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        if in_notes:
-            # Parse note row: pitch,start,length,velocity
-            parts = line.split(",")
-            if len(parts) >= 4:
-                try:
-                    result["notes"].append({
-                        "pitch": int(float(parts[0].strip())),
-                        "start": float(parts[1].strip()),
-                        "length": float(parts[2].strip()),
-                        "velocity": int(float(parts[3].strip())),
-                    })
-                except (ValueError, IndexError):
-                    continue
-            continue
-
-        # Check for notes header (supports both {fields} and (fields) syntax)
-        if "notes[" in line and ("{" in line or "(" in line):
-            in_notes = True
-            continue
-
-        # Parse key: value lines
-        if ":" in line and not line.startswith("notes"):
-            key, _, value = line.partition(":")
-            key = key.strip().lower()
-            value = value.strip()
-            if key == "tempo":
-                try:
-                    result["tempo"] = float(value)
-                except ValueError:
-                    pass
-            elif key == "time_sig":
-                result["time_sig"] = value
-            elif key == "track":
-                result["track"] = value
-            elif key == "instrument":
-                result["instrument"] = value
-
-    return result
-
-
-async def execute_music_spec(spec: dict):
-    """Execute a parsed music spec directly via REAPER tools (no LLM needed)."""
-    tempo = spec["tempo"]
-    beat_duration = 60.0 / tempo
-
-    # Convert notes from beats to seconds
-    notes = []
-    for note in spec["notes"]:
-        notes.append({
-            "pitch": note["pitch"],
-            "start_position": round(note["start"] * beat_duration, 4),
-            "length": round(note["length"] * beat_duration, 4),
-            "velocity": note["velocity"],
-        })
-
-    # Calculate total duration
-    if notes:
-        last_note = max(notes, key=lambda n: n["start_position"] + n["length"])
-        total_seconds = last_note["start_position"] + last_note["length"] + 1.0
-    else:
-        total_seconds = 10.0
-
-    # 1. Set tempo
-    print(f"  -> set_tempo(bpm={tempo})")
-    await reaper_tools.TOOLS["set_tempo"](bpm=tempo)
-
-    # 2. Get current track count to know the index
-    result = await reaper_tools.TOOLS["get_track_count"]()
-    track_index = result.get("ret", 0)
-
-    # 3. Insert track
-    print(f"  -> insert_track(name={spec['track']})")
-    await reaper_tools.TOOLS["insert_track"](index=track_index, name=spec["track"])
-
-    # 4. Add instrument
-    print(f"  -> track_fx_add_by_name(fx_name={spec['instrument']})")
-    await reaper_tools.TOOLS["track_fx_add_by_name"](
-        track_index=track_index, fx_name=spec["instrument"]
-    )
-
-    # 5. Create MIDI item
-    print(f"  -> create_midi_item(length={round(total_seconds, 2)})")
-    await reaper_tools.TOOLS["create_midi_item"](
-        track_index=track_index, position=0, length=total_seconds
-    )
-
-    # 6. Add all notes in one batch
-    print(f"  -> add_midi_notes_batch({len(notes)} notes)")
-    await reaper_tools.TOOLS["add_midi_notes_batch"](
-        track_index=track_index, item_index=0, notes=notes
-    )
-
-    # 7. Play from beginning
-    print("  -> set_cursor_position(0)")
-    await reaper_tools.TOOLS["set_cursor_position"](position=0)
-    print("  -> play()")
-    await reaper_tools.TOOLS["play"]()
-
-    return (
-        f"Created track '{spec['track']}' with {spec['instrument']} at {tempo} BPM. "
-        f"Added {len(notes)} notes ({round(total_seconds, 1)}s). Playing now."
-    )
+Be concise. Describe what you did briefly."""
 
 
 # --- Agentic loop ---
 
-async def run_agentic_loop(
-    client: BackboardClient,
-    thread_id: str,
-    user_message: str,
-):
-    """Run the agentic tool-use loop until the LLM gives a final text response."""
+class BrokenThreadError(Exception):
+    """Raised when a Backboard thread is in a broken state and needs replacement."""
+    pass
+
+
+def _validate_response(response):
+    """Raise BrokenThreadError if response looks like an error, not real LLM output.
+
+    Checks every string field on the response object for error indicators.
+    This avoids fragile field-name guessing (content vs message vs other).
+    """
+    for attr in vars(response) if hasattr(response, '__dict__') else []:
+        val = getattr(response, attr, None)
+        if isinstance(val, str) and len(val) > 20:
+            if "tool_call" in val and "invalid_request_error" in val:
+                raise BrokenThreadError(val[:300])
+            if "LLM Error" in val or "LLM API Error" in val:
+                raise BrokenThreadError(val[:300])
+    # Also check if response is a raw dict (some SDK versions)
+    if isinstance(response, dict):
+        text = json.dumps(response)
+        if "tool_call" in text and "invalid_request_error" in text:
+            raise BrokenThreadError(text[:300])
+
+
+async def run_agentic_loop(client, thread_id, user_message, status_callback=None):
     response = await client.add_message(
-        thread_id=thread_id,
-        content=user_message,
-        stream=False,
+        thread_id=thread_id, content=user_message, stream=False,
     )
+    _validate_response(response)
 
     while response.status == "REQUIRES_ACTION" and response.tool_calls:
-        print(f"  [{len(response.tool_calls)} tool call(s)]")
-
+        if status_callback:
+            status_callback(f"Executing {len(response.tool_calls)} tool(s)...")
         tool_outputs = []
         for tc in response.tool_calls:
-            # Handle both object and dict formats
-            if isinstance(tc, dict):
-                func = tc.get("function", {})
-                tc_id = tc.get("id", "")
-                name = func.get("name", "")
-                args = func.get("parsed_arguments") or json.loads(func.get("arguments", "{}"))
-            else:
-                tc_id = tc.id
-                name = tc.function.name
-                args = tc.function.parsed_arguments
-            print(f"  -> {name}({json.dumps(args, indent=None)[:80]})")
-            result = await execute_tool(name, args)
+            try:
+                if isinstance(tc, dict):
+                    func = tc.get("function", {})
+                    tc_id = tc.get("id", "")
+                    name = func.get("name", "")
+                    raw_args = func.get("parsed_arguments") or func.get("arguments", "{}")
+                    args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args)
+                else:
+                    tc_id = tc.id
+                    name = tc.function.name
+                    args = tc.function.parsed_arguments
+                    if not isinstance(args, dict):
+                        args = json.loads(args) if args else {}
+                if status_callback:
+                    status_callback(f"-> {name}")
+                print(f"[Tool] {name}({json.dumps(args)[:200]})")
+                result = await execute_tool(name, args)
+            except Exception as e:
+                print(f"[Tool Error] {e}")
+                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                name = "unknown"
+                result = {"ok": False, "error": str(e)}
             tool_outputs.append({
                 "tool_call_id": tc_id,
                 "output": json.dumps(result),
             })
-
-        response = await client.submit_tool_outputs(
-            thread_id=thread_id,
-            run_id=response.run_id,
-            tool_outputs=tool_outputs,
-        )
+        print(f"[Submit] {len(tool_outputs)} tool outputs, run_id={response.run_id}")
+        try:
+            response = await client.submit_tool_outputs(
+                thread_id=thread_id, run_id=response.run_id, tool_outputs=tool_outputs,
+            )
+        except Exception as e:
+            print(f"[Submit Error] {e}, retrying once...")
+            try:
+                response = await client.submit_tool_outputs(
+                    thread_id=thread_id, run_id=response.run_id, tool_outputs=tool_outputs,
+                )
+            except Exception:
+                raise BrokenThreadError(f"submit_tool_outputs failed: {e}")
+        _validate_response(response)
 
     return response.content
 
 
-# --- Main ---
+# --- Dear PyGui UI ---
 
-async def main():
-    load_dotenv()
+# Colors
+COLOR_BG = (30, 30, 35, 255)
+COLOR_USER = (130, 180, 255)
+COLOR_AI = (220, 220, 220)
+COLOR_STATUS = (150, 150, 150)
+COLOR_HEADER = (100, 150, 255)
+COLOR_INPUT_BG = (45, 45, 50, 255)
 
-    api_key = os.environ.get("BACKBOARD_API_KEY")
-    if not api_key:
-        print("Error: BACKBOARD_API_KEY not set.")
-        print("Set it as an environment variable or add it to a .env file.")
-        sys.exit(1)
+PANEL_WIDTH = 380
+PANEL_MIN_WIDTH = 300
 
-    client = BackboardClient(api_key=api_key)
 
-    print("Generating tool schemas...")
-    tool_schemas = generate_tool_schemas()
-    print(f"Loaded {len(tool_schemas)} REAPER tools.")
+def get_screen_size():
+    """Get screen dimensions using ctypes (Windows)."""
+    user32 = ctypes.windll.user32
+    user32.SetProcessDPIAware()
+    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
-    print("Setting up assistants...")
 
-    # Composer assistant — no tools, generates TOON specs
-    composer_assistant = await client.create_assistant(
-        name="Music Composer",
-        system_prompt=COMPOSER_SYSTEM_PROMPT,
-    )
-    composer_thread = await client.create_thread(assistant_id=composer_assistant.assistant_id)
+class ReaperAIApp:
+    def __init__(self):
+        self.client = None
+        self.assistant_id = None
+        self.thread_id = None
+        self.tool_schemas = None
+        self.async_loop = None
+        self.is_processing = False
+        self.message_count = 0
+        self.ui_queue = queue.Queue()
 
-    # Executor assistant — has REAPER tools
-    executor_assistant = await client.create_assistant(
-        name="REAPER Executor",
-        system_prompt=EXECUTOR_SYSTEM_PROMPT,
-        tools=tool_schemas,
-    )
-    executor_thread = await client.create_thread(assistant_id=executor_assistant.assistant_id)
+    def add_chat_message(self, text, color, prefix=""):
+        """Thread-safe: queue a chat message for the main thread."""
+        self.ui_queue.put(("chat", text, color, prefix))
 
-    print("\nREAPER AI Assistant")
-    print("Type your message, or 'quit' to exit.\n")
+    def set_status(self, text):
+        """Thread-safe: queue a status update for the main thread."""
+        self.ui_queue.put(("status", text))
 
-    while True:
-        try:
-            user_input = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
+    def _set_input_enabled(self, enabled):
+        """Thread-safe: queue input state change for the main thread."""
+        self.ui_queue.put(("input_enabled", enabled))
 
+    def _drain_ui_queue(self):
+        """Process pending UI updates. Called from main render loop."""
+        while not self.ui_queue.empty():
+            try:
+                cmd = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if cmd[0] == "chat":
+                _, text, color, prefix = cmd
+                self.message_count += 1
+                full_text = f"{prefix}{text}" if prefix else text
+                dpg.add_text(
+                    full_text, parent="chat_history", wrap=PANEL_WIDTH - 40,
+                    color=color, tag=f"msg_{self.message_count}",
+                )
+                dpg.add_spacer(height=5, parent="chat_history")
+                dpg.set_y_scroll("chat_history", dpg.get_y_scroll_max("chat_history") + 100)
+            elif cmd[0] == "status":
+                dpg.set_value("status_text", cmd[1])
+            elif cmd[0] == "input_enabled":
+                enabled = cmd[1]
+                dpg.configure_item("send_btn", enabled=enabled)
+                dpg.configure_item("input_field", enabled=enabled)
+                if enabled:
+                    dpg.focus_item("input_field")
+
+    def on_send(self, sender=None, app_data=None):
+        """Handle send button or Enter key."""
+        if self.is_processing:
+            return
+
+        user_input = dpg.get_value("input_field").strip()
         if not user_input:
-            continue
-        if user_input.lower() in ("quit", "exit", "q"):
-            print("Goodbye!")
-            break
+            return
 
+        # Clear input and show user message
+        dpg.set_value("input_field", "")
+        self.add_chat_message(user_input, COLOR_USER, prefix="You: ")
+
+        # Process in background
+        self.is_processing = True
+        self._set_input_enabled(False)
+        self.set_status("Thinking...")
+
+        asyncio.run_coroutine_threadsafe(
+            self._process_message(user_input), self.async_loop
+        )
+
+    async def _process_message(self, user_input):
+        """Process a user message (runs in async thread)."""
         try:
-            if needs_composition(user_input):
-                # Two-step pipeline: Composer LLM → Direct REAPER execution
-                toon_spec = await compose_music_spec(
-                    client, composer_thread.thread_id, user_input
-                )
-                print(f"  [TOON spec preview: {toon_spec[:200]}...]")
+            # Inject current project state as context
+            self.set_status("Reading project state...")
+            try:
+                project_state = await reaper_tools.TOOLS["get_project_summary"]()
+                augmented = f"[Current REAPER project state: {json.dumps(project_state)}]\n\n{user_input}"
+            except Exception:
+                augmented = user_input
 
-                spec = parse_toon_spec(toon_spec)
-                print(f"  [Parsed: {len(spec['notes'])} notes, {spec['tempo']} BPM, {spec['instrument']}]")
-
-                if not spec["notes"]:
-                    print("\nError: Composer returned no notes. Raw output:")
-                    print(toon_spec)
-                    print()
-                    continue
-
-                response = await execute_music_spec(spec)
-            else:
-                # Direct to executor for non-composition tasks
+            try:
                 response = await run_agentic_loop(
-                    client, executor_thread.thread_id, user_input
+                    self.client, self.thread_id, augmented,
+                    status_callback=self.set_status,
+                )
+            except BrokenThreadError as e:
+                print(f"[Recovery] Broken thread detected: {e}")
+                self.set_status("Recovering — creating new thread...")
+                thread = await self.client.create_thread(
+                    assistant_id=self.assistant_id
+                )
+                self.thread_id = thread.thread_id
+                self.add_chat_message("Thread recovered. Retrying...", COLOR_STATUS)
+                response = await run_agentic_loop(
+                    self.client, self.thread_id, augmented,
+                    status_callback=self.set_status,
                 )
 
-            print(f"\n{response}\n")
+            self.add_chat_message(response, COLOR_AI, prefix="AI: ")
+            self.set_status("Ready")
+
         except Exception as e:
-            print(f"\nError: {e}\n")
+            self.add_chat_message(f"Error: {e}", (255, 100, 100))
+            self.set_status("Error")
+            print(f"[Error] {e}")
+
+        finally:
+            self.is_processing = False
+            self._set_input_enabled(True)
+
+    def on_input_enter(self, sender, app_data):
+        """Handle Enter key in input field."""
+        self.on_send()
+
+    async def initialize_backend(self):
+        """Set up Backboard client and assistant."""
+        api_key = os.environ.get("BACKBOARD_API_KEY")
+        if not api_key:
+            self.add_chat_message(
+                "BACKBOARD_API_KEY not set. Add it to .env file.", (255, 100, 100)
+            )
+            return False
+
+        self.set_status("Connecting to Backboard...")
+        self.client = BackboardClient(api_key=api_key)
+
+        self.set_status("Generating tool schemas...")
+        self.tool_schemas = generate_tool_schemas()
+
+        self.set_status("Creating assistant...")
+        assistant = await self.client.create_assistant(
+            name="REAPER Assistant", system_prompt=SYSTEM_PROMPT,
+            tools=self.tool_schemas,
+        )
+        self.assistant_id = assistant.assistant_id
+        thread = await self.client.create_thread(
+            assistant_id=self.assistant_id
+        )
+        self.thread_id = thread.thread_id
+
+        self.set_status("Ready")
+        self.add_chat_message(
+            f"Connected. {len(self.tool_schemas)} REAPER tools loaded.", COLOR_STATUS
+        )
+        self._set_input_enabled(True)
+        return True
+
+    def run(self):
+        """Launch the Dear PyGui overlay."""
+        load_dotenv()
+
+        screen_w, screen_h = get_screen_size()
+
+        dpg.create_context()
+
+        # Create the main window content
+        with dpg.window(tag="primary", no_title_bar=True, no_move=True, no_resize=True):
+            # Header
+            dpg.add_text("REAPER AI", color=COLOR_HEADER)
+            dpg.add_separator()
+
+            # Chat history (scrollable)
+            with dpg.child_window(
+                tag="chat_history", autosize_x=True, height=-70,
+                border=False,
+            ):
+                dpg.add_text("Initializing...", color=COLOR_STATUS, tag="init_msg")
+
+            dpg.add_separator()
+
+            # Status bar
+            dpg.add_text("Starting up...", tag="status_text", color=COLOR_STATUS)
+
+            # Input row
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(
+                    tag="input_field", hint="Type a message...",
+                    width=-60, on_enter=True, callback=self.on_input_enter,
+                    enabled=False,
+                )
+                dpg.add_button(
+                    tag="send_btn", label="Send", width=55,
+                    callback=self.on_send, enabled=False,
+                )
+
+        # Viewport setup
+        dpg.create_viewport(
+            title="REAPER AI",
+            width=PANEL_WIDTH,
+            height=screen_h - 40,
+            x_pos=screen_w - PANEL_WIDTH - 10,
+            y_pos=0,
+            always_on_top=True,
+            resizable=False,
+            min_width=PANEL_MIN_WIDTH,
+            clear_color=COLOR_BG,
+        )
+
+        dpg.setup_dearpygui()
+        dpg.show_viewport()
+        dpg.set_primary_window("primary", True)
+
+        # Start async event loop in background thread
+        def run_async_loop(loop):
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        self.async_loop = asyncio.new_event_loop()
+        async_thread = threading.Thread(
+            target=run_async_loop, args=(self.async_loop,), daemon=True
+        )
+        async_thread.start()
+
+        # Initialize backend
+        asyncio.run_coroutine_threadsafe(
+            self.initialize_backend(), self.async_loop
+        )
+
+        # Render loop
+        while dpg.is_dearpygui_running():
+            self._drain_ui_queue()
+            dpg.render_dearpygui_frame()
+
+        dpg.destroy_context()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app = ReaperAIApp()
+    app.run()

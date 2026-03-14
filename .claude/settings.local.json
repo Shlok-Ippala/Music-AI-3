@@ -24,7 +24,8 @@
       "WebSearch",
       "mcp__backboard-docs__search_docs",
       "mcp__backboard-docs__list_pages",
-      "mcp__backboard-docs__get_page"
+      "mcp__backboard-docs__get_page",
+      "WebFetch(domain:github.com)"
     ]
   },
   "enableAllProjectMcpServers": true,
