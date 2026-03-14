@@ -263,8 +263,8 @@ def parse_toon_spec(toon_spec: str) -> dict:
                     continue
             continue
 
-        # Check for notes header (supports both {fields} and (fields) syntax)
-        if "notes[" in line and ("{" in line or "(" in line):
+        # Check for notes header (supports notes[N]:, notes[N]{...}, notes[N](...) syntax)
+        if "notes[" in line:
             in_notes = True
             continue
 
@@ -429,8 +429,6 @@ async def main():
         system_prompt=EXECUTOR_SYSTEM_PROMPT,
         tools=tool_schemas,
     )
-    executor_thread = await client.create_thread(assistant_id=executor_assistant.assistant_id)
-
     print("\nREAPER AI Assistant")
     print("Type your message, or 'quit' to exit.\n")
 
@@ -466,7 +464,8 @@ async def main():
 
                 response = await execute_music_spec(spec)
             else:
-                # Direct to executor for non-composition tasks
+                # Fresh thread per request to avoid corrupted tool call state
+                executor_thread = await client.create_thread(assistant_id=executor_assistant.assistant_id)
                 response = await run_agentic_loop(
                     client, executor_thread.thread_id, user_input
                 )
