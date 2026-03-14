@@ -270,7 +270,7 @@ async def set_track_name(track_index: int, name: str) -> dict:
         track_index: Track index (0-based) or -1 for master track.
         name: New name for the track.
     """
-    return await reaper_call("GetSetMediaTrackInfo_String", track_index, "P_NAME", name, True)
+    return await reaper_call("GetSetMediaTrackInfo_String", 0, track_index, "P_NAME", name, True)
 
 
 @tool

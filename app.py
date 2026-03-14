@@ -2,12 +2,10 @@
 """
 REAPER AI Assistant
 
-Side panel overlay using Dear PyGui + Backboard.io to control REAPER DAW.
-Single unified LLM with tool-calling for all music production tasks.
+Side panel overlay using Dear PyGui + OpenAI-compatible API to control REAPER DAW.
 """
 
 import os
-import sys
 import json
 import asyncio
 import inspect
@@ -18,7 +16,7 @@ import queue
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
-from backboard import BackboardClient
+from openai import AsyncOpenAI
 
 import reaper_tools
 
@@ -87,22 +85,45 @@ def _get_json_type(annotation):
         args = getattr(annotation, "__args__", None)
         if args:
             return {"type": "array", "items": {"type": TYPE_MAP.get(args[0], "string")}}
-        return {"type": "array"}
+        return {"type": "array", "items": {}}
+    if annotation is list:
+        return {"type": "array", "items": {}}
     return {"type": TYPE_MAP.get(annotation, "string")}
 
 
-SKIP_TOOLS = {
-    "zoom_to_selection", "zoom_to_project",
-    "create_midi_item", "add_midi_notes_batch",  # replaced by beat-based versions
-    "add_midi_note",  # force LLM to use batch
-    "duplicate_item",  # force LLM to generate all notes directly
+ALLOWED_TOOLS = {
+    # Track management
+    "get_track_count", "get_all_tracks", "insert_track", "delete_track",
+    "set_track_name", "set_track_volume", "set_track_pan",
+    "set_track_mute", "set_track_solo", "set_track_color",
+    # FX
+    "track_fx_add_by_name", "track_fx_delete", "track_fx_get_list",
+    "track_fx_set_param", "track_fx_get_param", "track_fx_get_num_params",
+    "track_fx_get_param_name",
+    # MIDI (beat-based only)
+    "create_midi_item_beats", "add_midi_notes_batch_beats",
+    "get_midi_notes", "clear_midi_item", "delete_midi_note",
+    # Audio items
+    "insert_audio_file", "get_track_items", "get_item_info",
+    "set_item_position", "set_item_length", "delete_item",
+    # Transport & project
+    "play", "stop", "pause", "set_tempo", "get_tempo",
+    "set_time_signature", "save_project", "get_project_summary",
+    # Routing
+    "create_send", "create_bus",
+    # Markers
+    "add_marker", "add_region", "get_markers",
+    # Mixing helpers
+    "add_eq", "add_compressor", "add_limiter",
+    # Undo
+    "undo", "redo",
 }
 
 
 def generate_tool_schemas() -> list:
     schemas = []
     for name, func in reaper_tools.TOOLS.items():
-        if name in SKIP_TOOLS:
+        if name not in ALLOWED_TOOLS:
             continue
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
@@ -147,16 +168,46 @@ async def execute_tool(tool_name: str, tool_input: dict) -> dict:
 
 # --- System prompt ---
 
-SYSTEM_PROMPT = """You are a REAPER DAW music production assistant. You help producers build tracks incrementally.
+def load_plugins():
+    """Load user's available plugins from plugins.json."""
+    plugins_path = Path(__file__).parent / "plugins.json"
+    if plugins_path.exists():
+        try:
+            data = json.loads(plugins_path.read_text())
+            return {
+                "instruments": data.get("instruments", []),
+                "effects": data.get("effects", []),
+            }
+        except Exception:
+            pass
+    return {"instruments": [], "effects": []}
+
+
+def build_system_prompt():
+    """Build system prompt with available plugins injected."""
+    plugins = load_plugins()
+    plugin_section = ""
+    if plugins["instruments"] or plugins["effects"]:
+        plugin_section = "\n## AVAILABLE PLUGINS (use these exact names with track_fx_add_by_name)\n"
+        if plugins["instruments"]:
+            plugin_section += "Instruments:\n" + "\n".join(f"- {p}" for p in plugins["instruments"]) + "\n"
+        if plugins["effects"]:
+            plugin_section += "Effects:\n" + "\n".join(f"- {p}" for p in plugins["effects"]) + "\n"
+        plugin_section += "\nALWAYS use plugins from this list. Use the EXACT name shown above. Do NOT guess plugin names.\n"
+
+    return BASE_SYSTEM_PROMPT.replace("{PLUGINS}", plugin_section)
+
+
+BASE_SYSTEM_PROMPT = """You are a REAPER DAW music production assistant. You help producers build tracks incrementally.
 
 The current project state is provided at the start of each message. ALWAYS work incrementally - add to the existing project.
-
+{PLUGINS}
 ## CRITICAL RULES
 1. To add MIDI notes, you MUST use add_midi_notes_batch_beats. Generate ALL notes in a SINGLE call.
 2. To create MIDI items, use create_midi_item_beats.
 3. NEVER use add_midi_note (singular). It does not exist in your tools.
 4. NEVER use duplicate_item to repeat patterns. Instead, generate all notes for all bars directly.
-5. For instruments, use track_fx_add_by_name with "ReaSynth" (for synths) or standard names.
+5. For instruments, use track_fx_add_by_name with the EXACT plugin name from the available plugins list.
 
 ## ADDING NOTES - STEP BY STEP
 1. set_tempo(bpm) - set the project tempo
@@ -184,86 +235,53 @@ Chords from root: Major=(0,4,7) Minor=(0,3,7) Maj7=(0,4,7,11) Min7=(0,3,7,10) Do
 Be concise. Describe what you did briefly."""
 
 
-# --- Agentic loop ---
+# --- Agentic loop (OpenAI Chat Completions) ---
 
-class BrokenThreadError(Exception):
-    """Raised when a Backboard thread is in a broken state and needs replacement."""
-    pass
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def _validate_response(response):
-    """Raise BrokenThreadError if response looks like an error, not real LLM output.
-
-    Checks every string field on the response object for error indicators.
-    This avoids fragile field-name guessing (content vs message vs other).
-    """
-    for attr in vars(response) if hasattr(response, '__dict__') else []:
-        val = getattr(response, attr, None)
-        if isinstance(val, str) and len(val) > 20:
-            if "tool_call" in val and "invalid_request_error" in val:
-                raise BrokenThreadError(val[:300])
-            if "LLM Error" in val or "LLM API Error" in val:
-                raise BrokenThreadError(val[:300])
-    # Also check if response is a raw dict (some SDK versions)
-    if isinstance(response, dict):
-        text = json.dumps(response)
-        if "tool_call" in text and "invalid_request_error" in text:
-            raise BrokenThreadError(text[:300])
-
-
-async def run_agentic_loop(client, thread_id, user_message, status_callback=None):
-    response = await client.add_message(
-        thread_id=thread_id, content=user_message, stream=False,
+async def run_agentic_loop(client, messages, tool_schemas, status_callback=None):
+    """Run the OpenAI tool-calling loop. Modifies messages list in-place."""
+    response = await client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=tool_schemas,
     )
-    _validate_response(response)
 
-    while response.status == "REQUIRES_ACTION" and response.tool_calls:
+    msg = response.choices[0].message
+    messages.append(msg)
+
+    while msg.tool_calls:
         if status_callback:
-            status_callback(f"Executing {len(response.tool_calls)} tool(s)...")
-        tool_outputs = []
-        for tc in response.tool_calls:
-            try:
-                if isinstance(tc, dict):
-                    func = tc.get("function", {})
-                    tc_id = tc.get("id", "")
-                    name = func.get("name", "")
-                    raw_args = func.get("parsed_arguments") or func.get("arguments", "{}")
-                    args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args)
-                else:
-                    tc_id = tc.id
-                    name = tc.function.name
-                    args = tc.function.parsed_arguments
-                    if not isinstance(args, dict):
-                        args = json.loads(args) if args else {}
-                if status_callback:
-                    status_callback(f"-> {name}")
-                print(f"[Tool] {name}({json.dumps(args)[:200]})")
-                result = await execute_tool(name, args)
-            except Exception as e:
-                print(f"[Tool Error] {e}")
-                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                name = "unknown"
-                result = {"ok": False, "error": str(e)}
-            tool_outputs.append({
-                "tool_call_id": tc_id,
-                "output": json.dumps(result),
-            })
-        print(f"[Submit] {len(tool_outputs)} tool outputs, run_id={response.run_id}")
-        try:
-            response = await client.submit_tool_outputs(
-                thread_id=thread_id, run_id=response.run_id, tool_outputs=tool_outputs,
-            )
-        except Exception as e:
-            print(f"[Submit Error] {e}, retrying once...")
-            try:
-                response = await client.submit_tool_outputs(
-                    thread_id=thread_id, run_id=response.run_id, tool_outputs=tool_outputs,
-                )
-            except Exception:
-                raise BrokenThreadError(f"submit_tool_outputs failed: {e}")
-        _validate_response(response)
+            status_callback(f"Executing {len(msg.tool_calls)} tool(s)...")
 
-    return response.content
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                args = {}
+            if status_callback:
+                status_callback(f"-> {name}")
+            print(f"[Tool] {name}({json.dumps(args)[:200]})")
+
+            result = await execute_tool(name, args)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": json.dumps(result),
+            })
+
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=tool_schemas,
+        )
+        msg = response.choices[0].message
+        messages.append(msg)
+
+    return msg.content or ""
 
 
 # --- Dear PyGui UI ---
@@ -274,8 +292,6 @@ COLOR_USER = (130, 180, 255)
 COLOR_AI = (220, 220, 220)
 COLOR_STATUS = (150, 150, 150)
 COLOR_HEADER = (100, 150, 255)
-COLOR_INPUT_BG = (45, 45, 50, 255)
-
 PANEL_WIDTH = 380
 PANEL_MIN_WIDTH = 300
 
@@ -290,8 +306,7 @@ def get_screen_size():
 class ReaperAIApp:
     def __init__(self):
         self.client = None
-        self.assistant_id = None
-        self.thread_id = None
+        self.messages = []
         self.tool_schemas = None
         self.async_loop = None
         self.is_processing = False
@@ -369,23 +384,12 @@ class ReaperAIApp:
             except Exception:
                 augmented = user_input
 
-            try:
-                response = await run_agentic_loop(
-                    self.client, self.thread_id, augmented,
-                    status_callback=self.set_status,
-                )
-            except BrokenThreadError as e:
-                print(f"[Recovery] Broken thread detected: {e}")
-                self.set_status("Recovering — creating new thread...")
-                thread = await self.client.create_thread(
-                    assistant_id=self.assistant_id
-                )
-                self.thread_id = thread.thread_id
-                self.add_chat_message("Thread recovered. Retrying...", COLOR_STATUS)
-                response = await run_agentic_loop(
-                    self.client, self.thread_id, augmented,
-                    status_callback=self.set_status,
-                )
+            self.messages.append({"role": "user", "content": augmented})
+
+            response = await run_agentic_loop(
+                self.client, self.messages, self.tool_schemas,
+                status_callback=self.set_status,
+            )
 
             self.add_chat_message(response, COLOR_AI, prefix="AI: ")
             self.set_status("Ready")
@@ -404,34 +408,25 @@ class ReaperAIApp:
         self.on_send()
 
     async def initialize_backend(self):
-        """Set up Backboard client and assistant."""
-        api_key = os.environ.get("BACKBOARD_API_KEY")
+        """Set up OpenAI client and tools."""
+        api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             self.add_chat_message(
-                "BACKBOARD_API_KEY not set. Add it to .env file.", (255, 100, 100)
+                "OPENAI_API_KEY not set. Add it to .env file.", (255, 100, 100)
             )
             return False
 
-        self.set_status("Connecting to Backboard...")
-        self.client = BackboardClient(api_key=api_key)
+        self.set_status("Initializing...")
+        self.client = AsyncOpenAI(api_key=api_key)
 
         self.set_status("Generating tool schemas...")
         self.tool_schemas = generate_tool_schemas()
 
-        self.set_status("Creating assistant...")
-        assistant = await self.client.create_assistant(
-            name="REAPER Assistant", system_prompt=SYSTEM_PROMPT,
-            tools=self.tool_schemas,
-        )
-        self.assistant_id = assistant.assistant_id
-        thread = await self.client.create_thread(
-            assistant_id=self.assistant_id
-        )
-        self.thread_id = thread.thread_id
+        self.messages = [{"role": "system", "content": build_system_prompt()}]
 
         self.set_status("Ready")
         self.add_chat_message(
-            f"Connected. {len(self.tool_schemas)} REAPER tools loaded.", COLOR_STATUS
+            f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}", COLOR_STATUS
         )
         self._set_input_enabled(True)
         return True

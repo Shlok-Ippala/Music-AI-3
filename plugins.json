@@ -1,0 +1,16 @@
+{
+  "instruments": [
+    "VSTi: ReaSynth (Cockos)",
+    "VSTi: Vital (Vital Audio)",
+    "VST3i: MT-PowerDrumKit (MANDA AUDIO) (16 out)",
+    "VST3i: Splice INSTRUMENT (Splice)",
+    "VST3i: Upright Piano (99Sounds) (32 out)",
+    "VST3i: Vital (Vital Audio)"
+  ],
+  "effects": [
+    "VST: ReaEQ (Cockos)",
+    "VST: ReaComp (Cockos)",
+    "VST: ReaLimit (Cockos)"
+  ],
+  "_instructions": "Add your installed plugins here using their exact REAPER FX browser names. To find the exact name: open REAPER > Track FX > click Add > search for the plugin > copy the full name shown."
+}
