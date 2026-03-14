@@ -19,6 +19,7 @@ import dearpygui.dearpygui as dpg
 from openai import AsyncOpenAI
 
 import reaper_tools
+import music_theory
 
 # --- .env loader ---
 
@@ -117,51 +118,67 @@ ALLOWED_TOOLS = {
     "add_eq", "add_compressor", "add_limiter",
     # Undo
     "undo", "redo",
+    # Music theory helpers
+    "get_chord_progression", "get_bass_line", "get_drum_pattern", "get_melody",
 }
+
+
+def _schema_for_func(name: str, func) -> dict:
+    """Build an OpenAI function-calling schema from a Python function."""
+    sig = inspect.signature(func)
+    doc = inspect.getdoc(func) or ""
+    description = re.split(r"\n\s*(Args|Returns|Raises|Note|Example):", doc)[0].strip()
+    arg_docs = _parse_arg_docs(doc)
+    properties = {}
+    required = []
+    for param_name, param in sig.parameters.items():
+        prop = _get_json_type(param.annotation)
+        if param_name in arg_docs:
+            prop["description"] = arg_docs[param_name]
+        properties[param_name] = prop
+        if param.default is inspect.Parameter.empty:
+            required.append(param_name)
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
 
 
 def generate_tool_schemas() -> list:
     schemas = []
+    # REAPER tools
     for name, func in reaper_tools.TOOLS.items():
         if name not in ALLOWED_TOOLS:
             continue
-        sig = inspect.signature(func)
-        doc = inspect.getdoc(func) or ""
-        description = re.split(r"\n\s*(Args|Returns|Raises|Note|Example):", doc)[0].strip()
-        arg_docs = _parse_arg_docs(doc)
-        properties = {}
-        required = []
-        for param_name, param in sig.parameters.items():
-            prop = _get_json_type(param.annotation)
-            if param_name in arg_docs:
-                prop["description"] = arg_docs[param_name]
-            properties[param_name] = prop
-            if param.default is inspect.Parameter.empty:
-                required.append(param_name)
-        schema = {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            },
-        }
-        schemas.append(schema)
+        schemas.append(_schema_for_func(name, func))
+    # Music theory tools
+    for name, func in music_theory.MUSIC_TOOLS.items():
+        if name not in ALLOWED_TOOLS:
+            continue
+        schemas.append(_schema_for_func(name, func))
     return schemas
 
 
 # --- Tool execution ---
 
 async def execute_tool(tool_name: str, tool_input: dict) -> dict:
-    func = reaper_tools.TOOLS.get(tool_name)
+    func = reaper_tools.TOOLS.get(tool_name) or music_theory.MUSIC_TOOLS.get(tool_name)
     if func is None:
         return {"ok": False, "error": f"Unknown tool: {tool_name}"}
     try:
-        return await func(**tool_input)
+        # Music theory tools are sync; REAPER tools are async
+        if inspect.iscoroutinefunction(func):
+            return await func(**tool_input)
+        else:
+            return func(**tool_input)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -198,41 +215,76 @@ def build_system_prompt():
     return BASE_SYSTEM_PROMPT.replace("{PLUGINS}", plugin_section)
 
 
-BASE_SYSTEM_PROMPT = """You are a REAPER DAW music production assistant. You help producers build tracks incrementally.
+BASE_SYSTEM_PROMPT = """You are a REAPER DAW music production assistant. You help producers build professional, layered tracks.
 
 The current project state is provided at the start of each message. ALWAYS work incrementally - add to the existing project.
 {PLUGINS}
 ## CRITICAL RULES
-1. To add MIDI notes, you MUST use add_midi_notes_batch_beats. Generate ALL notes in a SINGLE call.
-2. To create MIDI items, use create_midi_item_beats.
-3. NEVER use add_midi_note (singular). It does not exist in your tools.
-4. NEVER use duplicate_item to repeat patterns. Instead, generate all notes for all bars directly.
-5. For instruments, use track_fx_add_by_name with the EXACT plugin name from the available plugins list.
+1. ALWAYS use get_chord_progression, get_bass_line, get_drum_pattern, and get_melody to generate notes. NEVER compute MIDI note numbers yourself — the music theory tools handle correct notes, voicings, and humanization.
+2. To add MIDI notes, you MUST use add_midi_notes_batch_beats. Pass the notes array from the music theory tools directly.
+3. To create MIDI items, use create_midi_item_beats.
+4. NEVER use add_midi_note (singular). It does not exist in your tools.
+5. NEVER use duplicate_item to repeat patterns. Instead, generate all notes for all bars directly.
+6. For instruments, use track_fx_add_by_name with the EXACT plugin name from the available plugins list.
 
-## ADDING NOTES - STEP BY STEP
-1. set_tempo(bpm) - set the project tempo
-2. insert_track(index, name) - create the track
-3. track_fx_add_by_name(track_index, fx_name) - add instrument
-4. create_midi_item_beats(track_index, position_beats=0, length_beats=TOTAL_BEATS, tempo=BPM)
-5. add_midi_notes_batch_beats(track_index, item_index=0, tempo=BPM, notes=[...all notes...])
+## COMPOSING WORKFLOW (follow this order)
+1. **set_tempo(bpm)** — choose appropriate tempo for genre
+2. **get_chord_progression(genre, key, bars)** — get chord voicings. Save the returned notes for the chords/pads track.
+3. **For each layer, repeat:**
+   a. insert_track(index, name) — create the track
+   b. track_fx_add_by_name(track_index, fx_name) — add instrument plugin
+   b2. Configure synth parameters with track_fx_set_param (see SYNTH CONFIGURATION)
+   c. create_midi_item_beats(track_index, position_beats=0, length_beats=TOTAL_BEATS, tempo=BPM)
+   d. Get notes from the appropriate music theory tool:
+      - **Drums**: get_drum_pattern(genre, bars) — humanized drums with fills
+      - **Bass**: get_bass_line(key, genre, bars) — bass following chord roots
+      - **Chords/Pads**: use the notes from get_chord_progression (step 2)
+      - **Melody**: get_melody(key, genre, bars, density) — chord-tone melody
+   e. add_midi_notes_batch_beats(track_index, item_index=0, tempo=BPM, notes=NOTES_FROM_TOOL)
+4. **FX chain**: Add ReaEQ + ReaComp on every track. Add ReaLimit on the master.
 
-Each note in the notes array: (pitch, start_beat, length_beats, velocity, channel)
-Example - 4-bar kick (four-on-the-floor at 120 BPM):
-add_midi_notes_batch_beats(track_index=0, item_index=0, tempo=120, notes=[
-  (pitch=36, start_beat=0, length_beats=0.5, velocity=95),
-  (pitch=36, start_beat=1, length_beats=0.5, velocity=95),
-  (pitch=36, start_beat=2, length_beats=0.5, velocity=95),
-  (pitch=36, start_beat=3, length_beats=0.5, velocity=95),
-  ... (pitch=36, start_beat=4 through 15, same pattern)
-])
+Note format: each note is {pitch, start_beat, length_beats, velocity, channel}. Drums use channel 9.
 
-## MIDI REFERENCE
+## SYNTH CONFIGURATION
+After adding a synth plugin with track_fx_add_by_name, ALWAYS configure its parameters using track_fx_set_param. Do NOT leave synths at default settings.
+
+**ReaSynth** (fx_index is the position in the FX chain, usually 0):
+- Param 0 (Attack): 0.01-0.05 for plucks, 0.3-0.5 for pads
+- Param 1 (Decay): 0.3-0.6
+- Param 2 (Sustain): 0.5-0.8 for sustained sounds, 0.2-0.4 for plucks
+- Param 3 (Release): 0.2-0.5
+- Param 4 (Waveform): 0.0=sine (smooth), 0.25=triangle (warm), 0.5=square (hollow), 0.75=sawtooth (bright/buzzy) — prefer sine or triangle for bass/pads
+- Param 5 (Filter/Cutoff): 0.3-0.6 to tame brightness. Lower = warmer, less buzz.
+
+**Vital / other synths**: Use track_fx_get_num_params and track_fx_get_param_name to discover parameters, then set filter cutoff low and adjust attack/release for the desired sound.
+
+**General rules**:
+- For bass: sine or triangle wave, low filter cutoff (0.3-0.4), short attack
+- For pads/chords: triangle or filtered saw, medium filter cutoff (0.4-0.6), slow attack (0.3+), long release
+- For leads/melody: any waveform, medium filter cutoff, short attack
+- ALWAYS lower the filter cutoff from default to remove harshness
+
+## PRODUCTION GUIDELINES
+- **Drums**: Use MT-PowerDrumKit or ReaSynth. The drum pattern tool provides kick, snare, hi-hats with ghost notes and fills.
+- **Bass**: Instrument in octave 2-3 range. The bass tool follows chord roots with rhythmic variation.
+- **Chords/Pads**: Use Vital or Upright Piano. Chord progression tool provides voice-led voicings with strummed feel.
+- **Melody/Lead**: The melody tool uses chord tones on strong beats and scale tones on weak beats. Use density="sparse" for ambient, "medium" for standard, "dense" for busy.
+- **Timing**: Convert "seconds" requests to bars (e.g. 30 sec at 120 BPM = 16 bars = 64 beats).
+- Build at least 4 layers (drums, bass, chords, melody) unless the user asks for something specific.
+
+## GENRE DEFAULTS
+- **Hip-hop/Trap**: 70-90 BPM, key of minor (Cm, Am, Dm), dense hi-hats
+- **Lo-fi**: 75-85 BPM, key of major (C, F, Eb), jazzy chords, sparse melody
+- **Pop**: 100-120 BPM, key of major (C, G, D), medium density melody
+- **R&B**: 85-95 BPM, key of major (Eb, Ab, Bb), sparse melody
+- **Rock**: 110-140 BPM, key of major or minor (E, A, G), dense melody
+
+## MIDI REFERENCE (for manual adjustments only)
 Notes: C4=60, D4=62, E4=64, F4=65, G4=67, A4=69, B4=71, C5=72. Octave=+12.
-Drums (channel 9): Kick=36, Snare=38, Closed HH=42, Open HH=46, Clap=39, Crash=49, Ride=51
+Drums (GM/channel 9): Kick=36, Snare=38, Closed HH=42, Open HH=46, Crash=49, Ride=51
 Beats: whole=4, half=2, quarter=1, eighth=0.5, sixteenth=0.25
-Chords from root: Major=(0,4,7) Minor=(0,3,7) Maj7=(0,4,7,11) Min7=(0,3,7,10) Dom7=(0,4,7,10)
 
-Be concise. Describe what you did briefly."""
+Be concise. Describe what you built briefly — list the progression, layers, key, and tempo."""
 
 
 # --- Agentic loop (OpenAI Chat Completions) ---
