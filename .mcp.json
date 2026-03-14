@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "reaper": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["C:/Users/shlok/Personal Projects/Music AI/reaper-mcp/reaper_mcp_server.py"]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(REQ_FILE=\"$APPDATA/REAPER/Scripts/mcp_bridge_data/request_2.json\")",
+      "Bash(\"$REQ_FILE\")",
+      "Read(//c/Users/shlok/Personal Projects/Music AI/$APPDATA/REAPER/Scripts/mcp_bridge_data/**)",
+      "Bash(pip show:*)",
+      "Bash(python:*)",
+      "Bash(ls -lt \"C:/Users/shlok/.claude/debug/\"*.txt)",
+      "Bash(claude mcp:*)",
+      "mcp__reaper__insert_track",
+      "mcp__reaper__get_tempo",
+      "mcp__reaper__get_track_count",
+      "mcp__reaper__create_midi_item",
+      "mcp__reaper__get_all_tracks",
+      "mcp__reaper__set_track_name",
+      "mcp__reaper__add_midi_notes_batch",
+      "mcp__reaper__delete_item"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "reaper"
+  ]
+}
