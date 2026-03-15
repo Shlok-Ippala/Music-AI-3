@@ -50,6 +50,26 @@ body {
 #stop-btn { color: #ff7b7b; border-color: #ff7b7b44; }
 #stop-btn:hover:not(:disabled) { background: #2e1e1e; }
 
+#mp3-section {
+    padding: 8px 14px;
+    border-bottom: 1px solid #2e2e38;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+#mp3-filename {
+    flex: 1;
+    color: #555;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#mp3-filename.loaded { color: #8ab0ff; }
+#transcribe-btn { color: #7ec87e; border-color: #7ec87e44; }
+#transcribe-btn:hover:not(:disabled) { background: #1e2e1e; }
+
 #chat {
     flex: 1;
     overflow-y: auto;
@@ -142,6 +162,12 @@ body {
     <button class="btn" id="stop-btn" onclick="stopGen()" disabled>Stop</button>
 </div>
 
+<div id="mp3-section">
+    <span id="mp3-filename">No file selected</span>
+    <button class="btn" id="browse-btn" onclick="browseMP3()">Browse</button>
+    <button class="btn" id="transcribe-btn" onclick="transcribeMP3()" disabled>Transcribe</button>
+</div>
+
 <div id="chat"></div>
 
 <div id="status-bar">Starting up...</div>
@@ -181,7 +207,26 @@ function setProcessing(processing) {
     document.getElementById('send-btn').disabled = processing;
     document.getElementById('stop-btn').disabled = !processing;
     document.getElementById('clear-btn').disabled = processing;
+    document.getElementById('browse-btn').disabled = processing;
+    document.getElementById('transcribe-btn').disabled = processing || !window._mp3Path;
     if (!processing) setTimeout(() => document.getElementById('input').focus(), 50);
+}
+
+async function browseMP3() {
+    const path = await pywebview.api.browse_mp3();
+    if (path) {
+        window._mp3Path = path;
+        const el = document.getElementById('mp3-filename');
+        el.textContent = path.split('/').pop();
+        el.classList.add('loaded');
+        document.getElementById('transcribe-btn').disabled = false;
+    }
+}
+
+function transcribeMP3() {
+    if (!window._mp3Path) return;
+    setProcessing(true);
+    pywebview.api.transcribe_mp3(window._mp3Path);
 }
 
 function clearChat() {
