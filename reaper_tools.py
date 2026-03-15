@@ -48,7 +48,7 @@ def _default_bridge_dir():
 
 
 BRIDGE_DIR = Path(os.getenv("REAPER_BRIDGE_DIR", str(_default_bridge_dir())))
-FILE_TIMEOUT = 5.0
+FILE_TIMEOUT = 15.0
 FILE_POLL_INTERVAL = 0.02
 
 COMM_MODE = os.getenv("REAPER_COMM_MODE", "file").lower()

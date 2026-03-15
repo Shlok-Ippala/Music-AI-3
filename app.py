@@ -8,18 +8,21 @@ Side panel overlay using Dear PyGui + OpenAI-compatible API to control REAPER DA
 import os
 import json
 import asyncio
-import inspect
-import re
 import threading
 import ctypes
 import queue
+import platform
+import subprocess
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
-from openai import AsyncOpenAI
+import railtracks as rt
+from railtracks.llm import MessageHistory, UserMessage, AssistantMessage
 
 import reaper_tools
 import music_theory
+import plugin_scanner
+import plugin_installer
 
 # --- .env loader ---
 
@@ -32,64 +35,6 @@ def load_dotenv():
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 os.environ.setdefault(key.strip(), value.strip())
-
-
-# --- Tool schema generation ---
-
-TYPE_MAP = {
-    int: "integer",
-    float: "number",
-    str: "string",
-    bool: "boolean",
-    list: "array",
-    dict: "object",
-}
-
-
-def _parse_arg_docs(docstring: str) -> dict:
-    arg_docs = {}
-    in_args = False
-    current_param = None
-    current_desc_lines = []
-
-    for line in docstring.splitlines():
-        stripped = line.strip()
-        if stripped == "Args:":
-            in_args = True
-            continue
-        elif stripped in ("Returns:", "Raises:", "Note:", "Notes:", "Example:", "Examples:"):
-            if current_param:
-                arg_docs[current_param] = " ".join(current_desc_lines).strip()
-            in_args = False
-            continue
-        if not in_args:
-            continue
-        match = re.match(r"^(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$", stripped)
-        if match:
-            if current_param:
-                arg_docs[current_param] = " ".join(current_desc_lines).strip()
-            current_param = match.group(1)
-            current_desc_lines = [match.group(2)] if match.group(2) else []
-        elif current_param and stripped:
-            current_desc_lines.append(stripped)
-
-    if current_param:
-        arg_docs[current_param] = " ".join(current_desc_lines).strip()
-    return arg_docs
-
-
-def _get_json_type(annotation):
-    if annotation is inspect.Parameter.empty:
-        return {"type": "string"}
-    origin = getattr(annotation, "__origin__", None)
-    if origin is list:
-        args = getattr(annotation, "__args__", None)
-        if args:
-            return {"type": "array", "items": {"type": TYPE_MAP.get(args[0], "string")}}
-        return {"type": "array", "items": {}}
-    if annotation is list:
-        return {"type": "array", "items": {}}
-    return {"type": TYPE_MAP.get(annotation, "string")}
 
 
 ALLOWED_TOOLS = {
@@ -123,64 +68,27 @@ ALLOWED_TOOLS = {
 }
 
 
-def _schema_for_func(name: str, func) -> dict:
-    """Build an OpenAI function-calling schema from a Python function."""
-    sig = inspect.signature(func)
-    doc = inspect.getdoc(func) or ""
-    description = re.split(r"\n\s*(Args|Returns|Raises|Note|Example):", doc)[0].strip()
-    arg_docs = _parse_arg_docs(doc)
-    properties = {}
-    required = []
-    for param_name, param in sig.parameters.items():
-        prop = _get_json_type(param.annotation)
-        if param_name in arg_docs:
-            prop["description"] = arg_docs[param_name]
-        properties[param_name] = prop
-        if param.default is inspect.Parameter.empty:
-            required.append(param_name)
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        },
-    }
+# --- Railtracks agent setup ---
 
+def _build_rt_flow(system_prompt: str, api_key: str, model: str) -> rt.Flow:
+    """Build a Railtracks Flow with all REAPER + music theory tools."""
+    tool_funcs = [
+        func for name, func in reaper_tools.TOOLS.items() if name in ALLOWED_TOOLS
+    ] + [
+        func for name, func in music_theory.MUSIC_TOOLS.items() if name in ALLOWED_TOOLS
+    ]
 
-def generate_tool_schemas() -> list:
-    schemas = []
-    # REAPER tools
-    for name, func in reaper_tools.TOOLS.items():
-        if name not in ALLOWED_TOOLS:
-            continue
-        schemas.append(_schema_for_func(name, func))
-    # Music theory tools
-    for name, func in music_theory.MUSIC_TOOLS.items():
-        if name not in ALLOWED_TOOLS:
-            continue
-        schemas.append(_schema_for_func(name, func))
-    return schemas
+    # Strip "models/" prefix for GeminiLLM (litellm expects "gemini-2.5-flash" not "models/gemini-2.5-flash")
+    model_name = model.removeprefix("models/")
+    llm = rt.llm.GeminiLLM(model_name=model_name, api_key=api_key)
 
-
-# --- Tool execution ---
-
-async def execute_tool(tool_name: str, tool_input: dict) -> dict:
-    func = reaper_tools.TOOLS.get(tool_name) or music_theory.MUSIC_TOOLS.get(tool_name)
-    if func is None:
-        return {"ok": False, "error": f"Unknown tool: {tool_name}"}
-    try:
-        # Music theory tools are sync; REAPER tools are async
-        if inspect.iscoroutinefunction(func):
-            return await func(**tool_input)
-        else:
-            return func(**tool_input)
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    ReaperAgent = rt.agent_node(
+        "REAPER AI",
+        tool_nodes=tool_funcs,
+        llm=llm,
+        system_message=system_prompt,
+    )
+    return rt.Flow(name="REAPER Flow", entry_point=ReaperAgent)
 
 
 # --- System prompt ---
@@ -287,53 +195,9 @@ Beats: whole=4, half=2, quarter=1, eighth=0.5, sixteenth=0.25
 Be concise. Describe what you built briefly — list the progression, layers, key, and tempo."""
 
 
-# --- Agentic loop (OpenAI Chat Completions) ---
+# --- Model config ---
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-
-async def run_agentic_loop(client, messages, tool_schemas, status_callback=None):
-    """Run the OpenAI tool-calling loop. Modifies messages list in-place."""
-    response = await client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        tools=tool_schemas,
-    )
-
-    msg = response.choices[0].message
-    messages.append(msg)
-
-    while msg.tool_calls:
-        if status_callback:
-            status_callback(f"Executing {len(msg.tool_calls)} tool(s)...")
-
-        for tc in msg.tool_calls:
-            name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                args = {}
-            if status_callback:
-                status_callback(f"-> {name}")
-            print(f"[Tool] {name}({json.dumps(args)[:200]})")
-
-            result = await execute_tool(name, args)
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": json.dumps(result),
-            })
-
-        response = await client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=tool_schemas,
-        )
-        msg = response.choices[0].message
-        messages.append(msg)
-
-    return msg.content or ""
+MODEL = os.getenv("GEMINI_MODEL", "models/gemini-2.5-flash")
 
 
 # --- Dear PyGui UI ---
@@ -349,17 +213,32 @@ PANEL_MIN_WIDTH = 300
 
 
 def get_screen_size():
-    """Get screen dimensions using ctypes (Windows)."""
-    user32 = ctypes.windll.user32
-    user32.SetProcessDPIAware()
-    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    """Get screen dimensions cross-platform."""
+    system = platform.system()
+    if system == "Windows":
+        user32 = ctypes.windll.user32
+        user32.SetProcessDPIAware()
+        return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    elif system == "Darwin":
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", "tell application \"Finder\" to get bounds of window of desktop"],
+                capture_output=True, text=True, timeout=3,
+            )
+            parts = result.stdout.strip().split(", ")
+            if len(parts) == 4:
+                return int(parts[2]), int(parts[3])
+        except Exception:
+            pass
+        return 1920, 1080
+    else:
+        return 1920, 1080
 
 
 class ReaperAIApp:
     def __init__(self):
-        self.client = None
-        self.messages = []
-        self.tool_schemas = None
+        self.rt_flow = None
+        self.rt_history = MessageHistory([])
         self.async_loop = None
         self.is_processing = False
         self.message_count = 0
@@ -403,6 +282,61 @@ class ReaperAIApp:
                 if enabled:
                     dpg.focus_item("input_field")
 
+    def on_scan_plugins(self, sender=None, app_data=None):
+        """Scan REAPER plugin cache and update plugins.json."""
+        self.set_status("Scanning plugins...")
+        try:
+            result = plugin_scanner.scan_plugins()
+            api_key = os.environ.get("GEMINI_API_KEY", "")
+            self.rt_flow = _build_rt_flow(build_system_prompt(), api_key, MODEL)
+            self.add_chat_message(
+                f"Scanned: {result['instruments_found']} instruments, "
+                f"{result['effects_found']} effects. Agent updated.",
+                COLOR_STATUS,
+            )
+            self.set_status("Ready")
+        except Exception as e:
+            self.add_chat_message(f"Scan error: {e}", (255, 100, 100))
+            self.set_status("Ready")
+
+    def on_install_plugins(self, sender=None, app_data=None):
+        """Auto-discover and install plugins from Downloads/Desktop."""
+        self.set_status("Looking for plugins...")
+        self._set_input_enabled(False)
+
+        def run():
+            try:
+                result = plugin_installer.install_all()
+                if not result["installed"] and not result["failed"]:
+                    self.add_chat_message(
+                        "No new plugins found in Downloads or Desktop.", COLOR_STATUS
+                    )
+                else:
+                    for name in result["installed"]:
+                        self.add_chat_message(f"Installed: {name}", (100, 220, 100))
+                    for item in result["failed"]:
+                        self.add_chat_message(
+                            f"Failed: {item['name']} — {item['error']}", (255, 100, 100)
+                        )
+                    if result["installed"]:
+                        # Rebuild agent with newly scanned plugins
+                        api_key = os.environ.get("GEMINI_API_KEY", "")
+                        self.rt_flow = _build_rt_flow(build_system_prompt(), api_key, MODEL)
+                        self.add_chat_message(
+                            f"Done. {result['installed_count']} plugin(s) installed. "
+                            "Rescan REAPER (Preferences → Plug-ins → VST → Re-scan) "
+                            "then click Scan.",
+                            COLOR_STATUS,
+                        )
+            except Exception as e:
+                self.add_chat_message(f"Install error: {e}", (255, 100, 100))
+            finally:
+                self.set_status("Ready")
+                self._set_input_enabled(True)
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
     def on_send(self, sender=None, app_data=None):
         """Handle send button or Enter key."""
         if self.is_processing:
@@ -436,13 +370,13 @@ class ReaperAIApp:
             except Exception:
                 augmented = user_input
 
-            self.messages.append({"role": "user", "content": augmented})
+            self.rt_history.append(UserMessage(augmented))
 
-            response = await run_agentic_loop(
-                self.client, self.messages, self.tool_schemas,
-                status_callback=self.set_status,
-            )
+            self.set_status("Thinking...")
+            result = await self.rt_flow.ainvoke(self.rt_history)
+            response = result.text
 
+            self.rt_history.append(AssistantMessage(response))
             self.add_chat_message(response, COLOR_AI, prefix="AI: ")
             self.set_status("Ready")
 
@@ -460,25 +394,31 @@ class ReaperAIApp:
         self.on_send()
 
     async def initialize_backend(self):
-        """Set up OpenAI client and tools."""
-        api_key = os.environ.get("OPENAI_API_KEY")
+        """Set up Railtracks agent and tools."""
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             self.add_chat_message(
-                "OPENAI_API_KEY not set. Add it to .env file.", (255, 100, 100)
+                "GEMINI_API_KEY not set. Add it to .env file.", (255, 100, 100)
             )
             return False
 
-        self.set_status("Initializing...")
-        self.client = AsyncOpenAI(api_key=api_key)
+        self.set_status("Scanning plugins...")
+        try:
+            scan = plugin_scanner.scan_plugins()
+            plugin_info = f"{scan['instruments_found']} instruments, {scan['effects_found']} effects"
+        except Exception:
+            plugin_info = "plugin scan failed"
 
-        self.set_status("Generating tool schemas...")
-        self.tool_schemas = generate_tool_schemas()
+        self.set_status("Building Railtracks agent...")
+        self.rt_flow = _build_rt_flow(build_system_prompt(), api_key, MODEL)
+        self.rt_history = MessageHistory([])
 
-        self.messages = [{"role": "system", "content": build_system_prompt()}]
-
+        tool_count = sum(1 for n in ALLOWED_TOOLS if n in reaper_tools.TOOLS or n in music_theory.MUSIC_TOOLS)
         self.set_status("Ready")
         self.add_chat_message(
-            f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}", COLOR_STATUS
+            f"Connected via Railtracks. {tool_count} tools loaded. "
+            f"{plugin_info}. Model: {MODEL}",
+            COLOR_STATUS,
         )
         self._set_input_enabled(True)
         return True
@@ -494,7 +434,16 @@ class ReaperAIApp:
         # Create the main window content
         with dpg.window(tag="primary", no_title_bar=True, no_move=True, no_resize=True):
             # Header
-            dpg.add_text("REAPER AI", color=COLOR_HEADER)
+            with dpg.group(horizontal=True):
+                dpg.add_text("REAPER AI", color=COLOR_HEADER)
+                dpg.add_button(
+                    label="Scan", callback=self.on_scan_plugins,
+                    width=50,
+                )
+                dpg.add_button(
+                    label="Install", callback=self.on_install_plugins,
+                    width=55,
+                )
             dpg.add_separator()
 
             # Chat history (scrollable)
