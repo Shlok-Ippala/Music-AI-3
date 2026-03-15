@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>REAPER AI</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: #1a1a20;
+    color: #ddd;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#header {
+    padding: 10px 14px;
+    border-bottom: 1px solid #2e2e38;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+#header h1 {
+    color: #6496ff;
+    font-size: 14px;
+    font-weight: 600;
+    flex: 1;
+}
+
+.btn {
+    background: #252530;
+    color: #999;
+    border: 1px solid #3a3a48;
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    transition: background 0.1s;
+}
+.btn:hover:not(:disabled) { background: #2e2e3e; color: #bbb; }
+.btn:disabled { opacity: 0.35; cursor: default; }
+
+#stop-btn { color: #ff7b7b; border-color: #ff7b7b44; }
+#stop-btn:hover:not(:disabled) { background: #2e1e1e; }
+
+#chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+#chat::-webkit-scrollbar { width: 4px; }
+#chat::-webkit-scrollbar-track { background: transparent; }
+#chat::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+.msg-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    margin-bottom: 3px;
+    text-transform: uppercase;
+}
+.msg-text {
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.msg-user .msg-label { color: #5a8aee; }
+.msg-user .msg-text  { color: #c0d0ff; }
+
+.msg-ai .msg-label { color: #5a9e5a; }
+.msg-ai .msg-text  { color: #e0e0e0; }
+
+.msg-tool   .msg-text { color: #555; font-style: italic; font-size: 12px; }
+.msg-status .msg-text { color: #666; font-size: 12px; }
+.msg-error  .msg-text { color: #ff7b7b; }
+
+#status-bar {
+    padding: 4px 14px;
+    font-size: 11px;
+    color: #555;
+    border-top: 1px solid #222;
+    flex-shrink: 0;
+}
+
+#input-area {
+    padding: 10px 14px;
+    border-top: 1px solid #2e2e38;
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+    flex-shrink: 0;
+}
+
+#input {
+    flex: 1;
+    background: #22222c;
+    border: 1px solid #3a3a48;
+    border-radius: 6px;
+    color: #ddd;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    resize: none;
+    min-height: 36px;
+    max-height: 140px;
+    overflow-y: auto;
+    line-height: 1.45;
+    outline: none;
+    transition: border-color 0.15s;
+}
+#input:focus { border-color: #4a6ab866; }
+#input::placeholder { color: #444; }
+#input:disabled { opacity: 0.5; }
+
+#send-btn {
+    background: #2a3e6e;
+    color: #8ab0ff;
+    border-color: #3a5090;
+    padding: 8px 14px;
+    align-self: flex-end;
+    flex-shrink: 0;
+}
+#send-btn:hover:not(:disabled) { background: #3a5090; }
+</style>
+</head>
+<body>
+
+<div id="header">
+    <h1>REAPER AI</h1>
+    <button class="btn" id="clear-btn" onclick="clearChat()">Clear</button>
+    <button class="btn" id="stop-btn" onclick="stopGen()" disabled>Stop</button>
+</div>
+
+<div id="chat"></div>
+
+<div id="status-bar">Starting up...</div>
+
+<div id="input-area">
+    <textarea id="input" placeholder="Type your message... (Shift+Enter for new line)"
+        rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)" disabled></textarea>
+    <button class="btn" id="send-btn" onclick="sendMessage()" disabled>Send</button>
+</div>
+
+<script>
+function addMessage(role, text) {
+    const chat = document.getElementById('chat');
+    const div = document.createElement('div');
+    div.className = `msg-${role}`;
+    const labels = { user: 'You', ai: 'Reaper AI' };
+    const label = labels[role];
+    if (label) {
+        div.innerHTML = `<div class="msg-label">${label}</div><div class="msg-text">${esc(text)}</div>`;
+    } else {
+        div.innerHTML = `<div class="msg-text">${esc(text)}</div>`;
+    }
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+}
+
+function clearMessages() {
+    document.getElementById('chat').innerHTML = '';
+}
+
+function setStatus(text) {
+    document.getElementById('status-bar').textContent = text;
+}
+
+function setProcessing(processing) {
+    document.getElementById('input').disabled = processing;
+    document.getElementById('send-btn').disabled = processing;
+    document.getElementById('stop-btn').disabled = !processing;
+    document.getElementById('clear-btn').disabled = processing;
+    if (!processing) setTimeout(() => document.getElementById('input').focus(), 50);
+}
+
+function clearChat() {
+    pywebview.api.clear();
+}
+
+function stopGen() {
+    pywebview.api.stop();
+}
+
+function sendMessage() {
+    const input = document.getElementById('input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    autoResize(input);
+    addMessage('user', text);
+    setProcessing(true);
+    pywebview.api.send_message(text);
+}
+
+function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+}
+
+function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+
+function esc(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+}
+
+window.addEventListener('load', () => {
+    document.getElementById('input').focus();
+});
+</script>
+</body>
+</html>

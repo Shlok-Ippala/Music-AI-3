@@ -13,8 +13,9 @@ import inspect
 import re
 import threading
 import ctypes
-import queue
 from pathlib import Path
+
+import webview
 
 IS_MAC = sys.platform == "darwin"
 
@@ -285,6 +286,22 @@ After adding a synth plugin with track_fx_add_by_name, ALWAYS configure its para
 - **R&B**: 85-95 BPM, key of major (Eb, Ab, Bb), sparse melody
 - **Rock**: 110-140 BPM, key of major or minor (E, A, G), dense melody
 
+## TONE & MOOD → KEY SELECTION
+Genre defaults above give a starting key range. When the user also describes a mood or emotion, **use that to pick the specific key within or outside that range**. Mood overrides the default if there is a clear mismatch (e.g. a genre that defaults to major but the user asks for something dark → use minor).
+
+Mood → key guidance:
+- **Dark / menacing / evil / aggressive**: Low minor keys — Cm, F#m, Em
+- **Spooky / eerie / haunted / mysterious**: Minor keys — Dm, Bm, Em (avoid major)
+- **Sad / melancholic / emotional**: Minor keys — Am, Fm, Cm
+- **Tense / suspenseful / cinematic**: Minor with tension — Dm, Em, Bm
+- **Romantic / sensual / smooth**: Warm major — Eb, Ab, Bb major
+- **Happy / uplifting / bright**: Bright major — C, G, D major
+- **Dreamy / floaty / chill**: Soft major — F, Bb, Eb major
+- **Energetic / hype**: Driving minor — Fm, Cm, Gm
+- **Spiritual / soulful**: Eb major, Ab major, F minor
+
+When mood and genre both inform the key, choose the specific key that satisfies both — don't just pick the genre default and ignore the mood.
+
 ## MIDI REFERENCE (for manual adjustments only)
 Notes: C4=60, D4=62, E4=64, F4=65, G4=67, A4=69, B4=71, C5=72. Octave=+12.
 Drums (GM/channel 9): Kick=36, Snare=38, Closed HH=42, Open HH=46, Crash=49, Ride=51
@@ -365,19 +382,7 @@ async def run_agentic_loop(client, messages, tool_schemas, status_callback=None,
     return msg.content or ""
 
 
-# --- Dear PyGui UI ---
-
-# Colors
-COLOR_BG = (30, 30, 35, 255)
-COLOR_USER = (130, 180, 255)
-COLOR_AI = (220, 220, 220)
-COLOR_STATUS = (150, 150, 150)
-COLOR_HEADER = (100, 150, 255)
-COLOR_TOOL = (120, 120, 140)
-PANEL_WIDTH = 420
-PANEL_MIN_WIDTH = 300
-CHAT_WRAP = 380
-
+# --- pywebview UI ---
 
 def get_screen_size():
     """Get screen dimensions, cross-platform."""
@@ -396,6 +401,27 @@ def get_screen_size():
         return 1920, 1080
 
 
+class JsAPI:
+    """Exposes Python methods to JS via pywebview."""
+    def __init__(self, app):
+        self._app = app
+
+    def send_message(self, text):
+        if self._app.is_processing:
+            return
+        self._app.is_processing = True
+        self._app.stop_requested = False
+        asyncio.run_coroutine_threadsafe(
+            self._app._process_message(text), self._app.async_loop
+        )
+
+    def stop(self):
+        self._app.on_stop()
+
+    def clear(self):
+        self._app.clear_chat()
+
+
 class ReaperAIApp:
     def __init__(self):
         self.client = None
@@ -404,77 +430,21 @@ class ReaperAIApp:
         self.async_loop = None
         self.is_processing = False
         self.stop_requested = False
-        self.message_count = 0
-        self.ui_queue = queue.Queue()
-        self.status_message = None
+        self.window = None
+        self.connected_msg = None
 
-    def add_chat_message(self, text, color, prefix=""):
-        """Thread-safe: queue a chat message for the main thread."""
-        self.ui_queue.put(("chat", text, color, prefix))
+    def _js(self, call: str):
+        if self.window:
+            self.window.evaluate_js(call)
 
-    def set_status(self, text):
-        """Thread-safe: queue a status update for the main thread."""
-        self.ui_queue.put(("status", text))
+    def add_message(self, role: str, text: str):
+        self._js(f'addMessage({json.dumps(role)}, {json.dumps(text)})')
 
-    def _set_input_enabled(self, enabled):
-        """Thread-safe: queue input state change for the main thread."""
-        self.ui_queue.put(("input_enabled", enabled))
+    def set_status(self, text: str):
+        self._js(f'setStatus({json.dumps(text)})')
 
-    def _drain_ui_queue(self):
-        """Process pending UI updates. Called from main render loop."""
-        while not self.ui_queue.empty():
-            try:
-                cmd = self.ui_queue.get_nowait()
-            except queue.Empty:
-                break
-            if cmd[0] == "chat":
-                _, text, color, prefix = cmd
-                self.message_count += 1
-                full_text = f"{prefix}{text}" if prefix else text
-                dpg.add_text(
-                    full_text, parent="chat_history", wrap=CHAT_WRAP,
-                    color=color, tag=f"msg_{self.message_count}",
-                )
-                dpg.add_spacer(height=5, parent="chat_history")
-                dpg.set_y_scroll("chat_history", -1)
-            elif cmd[0] == "status":
-                dpg.set_value("status_text", cmd[1])
-            elif cmd[0] == "input_enabled":
-                enabled = cmd[1]
-                dpg.configure_item("send_btn", enabled=enabled)
-                dpg.configure_item("input_field", enabled=enabled)
-                dpg.configure_item("stop_btn", enabled=not enabled)
-                dpg.configure_item("clear_btn", enabled=enabled)
-                if enabled:
-                    dpg.focus_item("input_field")
-
-    def on_send(self, sender=None, app_data=None):
-        """Handle send button or Enter key."""
-        if self.is_processing:
-            return
-
-        user_input = dpg.get_value("input_field").strip()
-        if not user_input:
-            return
-
-        # Clear input and show user message
-        dpg.set_value("input_field", "")
-        self.add_chat_message(user_input, COLOR_USER, prefix="You: ")
-
-        # Process in background
-        self.is_processing = True
-        self.stop_requested = False
-        self._set_input_enabled(False)
-        self.set_status("Thinking...")
-
-        asyncio.run_coroutine_threadsafe(
-            self._process_message(user_input), self.async_loop
-        )
-
-    async def _process_message(self, user_input):
-        """Process a user message (runs in async thread)."""
+    async def _process_message(self, user_input: str):
         try:
-            # Inject current project state as context
             self.set_status("Reading project state...")
             try:
                 project_state = await reaper_tools.TOOLS["get_project_summary"]()
@@ -487,57 +457,44 @@ class ReaperAIApp:
             response = await run_agentic_loop(
                 self.client, self.messages, self.tool_schemas,
                 status_callback=self.set_status,
-                chat_callback=lambda msg: self.add_chat_message(msg, COLOR_TOOL),
+                chat_callback=lambda msg: self.add_message('tool', msg),
                 should_stop=lambda: self.stop_requested,
             )
 
-            self.add_chat_message(response, COLOR_AI, prefix="Reaper AI: ")
+            self.add_message('ai', response)
             self.set_status("Ready")
 
         except asyncio.CancelledError:
-            self.add_chat_message("Stopped.", COLOR_STATUS)
+            self.add_message('status', 'Stopped.')
             self.set_status("Ready")
 
         except Exception as e:
-            self.add_chat_message(f"Error: {e}", (255, 100, 100))
+            self.add_message('error', f'Error: {e}')
             self.set_status("Error")
             print(f"[Error] {e}")
 
         finally:
             self.is_processing = False
-            self._set_input_enabled(True)
+            self._js('setProcessing(false)')
 
     def clear_chat(self):
-        """Clear chat history and reset conversation."""
         if self.is_processing:
             return
-        for i in range(self.message_count):
-            tag = f"msg_{i + 1}"
-            if dpg.does_item_exist(tag):
-                dpg.delete_item(tag)
-        self.message_count = 0
         self.messages = [{"role": "system", "content": build_system_prompt()}]
-        if self.status_message:
-            self.add_chat_message(self.status_message[0], self.status_message[1])
+        self._js('clearMessages()')
+        if self.connected_msg:
+            self.add_message('status', self.connected_msg)
         self.set_status("Chat cleared")
 
     def on_stop(self):
-        """Request cancellation of the current generation."""
         if self.is_processing:
             self.stop_requested = True
             self.set_status("Stopping...")
 
-    def on_input_enter(self, sender, app_data):
-        """Handle Enter key in input field."""
-        self.on_send()
-
     async def initialize_backend(self):
-        """Set up OpenAI client and tools."""
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            self.add_chat_message(
-                "OPENAI_API_KEY not set. Add it to .env file.", (255, 100, 100)
-            )
+            self.add_message('error', 'OPENAI_API_KEY not set. Add it to .env file.')
             return False
 
         self.set_status("Initializing...")
@@ -548,97 +505,46 @@ class ReaperAIApp:
 
         self.messages = [{"role": "system", "content": build_system_prompt()}]
 
+        self.connected_msg = f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}"
+        self.add_message('status', self.connected_msg)
         self.set_status("Ready")
-        self.add_chat_message(
-            f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}", COLOR_STATUS
-        )
-        self.status_message = (f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}", COLOR_STATUS
-        )
-        self._set_input_enabled(True)
+        self._js('setProcessing(false)')
         return True
 
-    def run(self):
-        """Launch the Dear PyGui overlay."""
-        load_dotenv()
-
-        screen_w, screen_h = get_screen_size()
-
-        dpg.create_context()
-
-        # Create the main window content
-        with dpg.window(tag="primary", no_title_bar=True, no_move=True, no_resize=True):
-            # Header
-            with dpg.group(horizontal=True):
-                dpg.add_text("REAPER AI", color=COLOR_HEADER)
-                dpg.add_button(tag="clear_btn", label="Clear", callback=self.clear_chat, small=True)
-                dpg.add_button(tag="stop_btn", label="Stop Generating", callback=self.on_stop, small=True, enabled=False)
-            dpg.add_separator()
-
-            # Chat history (scrollable)
-            with dpg.child_window(
-                tag="chat_history", autosize_x=True, height=-70,
-                border=False,
-            ):
-                dpg.add_text("Initializing...", color=COLOR_STATUS, tag="init_msg")
-
-            dpg.add_separator()
-
-            # Status bar
-            dpg.add_text("Starting up...", tag="status_text", color=COLOR_STATUS)
-
-            # Input row
-            with dpg.group(horizontal=True):
-                dpg.add_input_text(
-                    tag="input_field", hint="Type a message...",
-                    width=-60, on_enter=True, callback=self.on_input_enter,
-                    enabled=False,
-                )
-                dpg.add_button(
-                    tag="send_btn", label="Send", width=55,
-                    callback=self.on_send, enabled=False,
-                )
-
-        # Viewport setup
-        y_pos = 25 if IS_MAC else 0
-        h_offset = 100 if IS_MAC else 40
-        dpg.create_viewport(
-            title="REAPER AI",
-            width=PANEL_WIDTH,
-            height=screen_h - h_offset,
-            x_pos=screen_w - PANEL_WIDTH - 10,
-            y_pos=y_pos,
-            always_on_top=True,
-            resizable=True,
-            min_width=PANEL_MIN_WIDTH,
-            clear_color=COLOR_BG,
+    def on_window_loaded(self):
+        self.set_status("Initializing...")
+        asyncio.run_coroutine_threadsafe(
+            self.initialize_backend(), self.async_loop
         )
 
-        dpg.setup_dearpygui()
-        dpg.show_viewport()
-        dpg.set_primary_window("primary", True)
+    def run(self):
+        load_dotenv()
+        screen_w, screen_h = get_screen_size()
 
-        # Start async event loop in background thread
         def run_async_loop(loop):
             asyncio.set_event_loop(loop)
             loop.run_forever()
 
         self.async_loop = asyncio.new_event_loop()
-        async_thread = threading.Thread(
-            target=run_async_loop, args=(self.async_loop,), daemon=True
+        threading.Thread(target=run_async_loop, args=(self.async_loop,), daemon=True).start()
+
+        html_path = Path(__file__).parent / "ui" / "index.html"
+        y_pos = 25 if IS_MAC else 0
+        h_offset = 100 if IS_MAC else 40
+
+        self.window = webview.create_window(
+            'REAPER AI',
+            url=str(html_path),
+            js_api=JsAPI(self),
+            width=420,
+            height=screen_h - h_offset,
+            x=screen_w - 420 - 10,
+            y=y_pos,
+            on_top=True,
+            resizable=True,
         )
-        async_thread.start()
-
-        # Initialize backend
-        asyncio.run_coroutine_threadsafe(
-            self.initialize_backend(), self.async_loop
-        )
-
-        # Render loop
-        while dpg.is_dearpygui_running():
-            self._drain_ui_queue()
-            dpg.render_dearpygui_frame()
-
-        dpg.destroy_context()
+        self.window.events.loaded += self.on_window_loaded
+        webview.start()
 
 
 if __name__ == "__main__":
