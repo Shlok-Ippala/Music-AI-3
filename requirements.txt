@@ -1,3 +1,5 @@
 openai>=1.0.0
 httpx>=0.25.0
 dearpygui>=2.0.0
+numpy>=1.23.0
+librosa>=0.10.0

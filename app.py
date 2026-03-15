@@ -495,37 +495,32 @@ class ReaperAIApp:
         self.on_send()
 
     def open_file_dialog(self):
-        """Open macOS Finder dialog using AppleScript."""
+        """Open a native file dialog to select an MP3 file."""
         try:
-            # Create AppleScript to show file dialog
-            script = '''
-            tell application "Finder"
-                activate
-                set theFile to choose file with prompt "Select MP3 File" of type {"mp3"}
-                return POSIX path of theFile
-            end tell
-            '''
-            
-            # Run AppleScript and capture output
-            result = subprocess.run(['osascript', '-e', script], 
-                                  capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0 and result.stdout.strip():
-                file_path = result.stdout.strip()
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            file_path = filedialog.askopenfilename(
+                title="Select MP3 File",
+                filetypes=[("MP3 files", "*.mp3"), ("All files", "*.*")],
+                parent=root,
+            )
+            root.destroy()
+
+            if file_path:
                 self.uploaded_file_path = file_path
                 dpg.set_value("mp3_file_path", file_path)
-                self.add_chat_message(f"✅ MP3 selected: {Path(file_path).name}", COLOR_USER)
-                self.add_chat_message("👆 Now click '🎵 Transcribe to REAPER MIDI' to convert", COLOR_STATUS)
+                self.add_chat_message(f"MP3 selected: {Path(file_path).name}", COLOR_USER)
+                self.add_chat_message("Now click 'Transcribe to REAPER MIDI' to convert", COLOR_STATUS)
                 self.set_status("MP3 loaded - ready to transcribe")
             else:
-                self.add_chat_message("❌ No file selected or dialog cancelled", COLOR_STATUS)
-                
-        except subprocess.TimeoutExpired:
-            self.add_chat_message("⏱️ File dialog timed out", (255, 100, 100))
+                self.add_chat_message("No file selected", COLOR_STATUS)
+
         except Exception as e:
-            self.add_chat_message(f"❌ Error opening file dialog: {str(e)}", (255, 100, 100))
-            # Fallback: show instructions for manual path entry
-            self.add_chat_message("💡 Please enter the MP3 path manually", COLOR_STATUS)
+            self.add_chat_message(f"Error opening file dialog: {str(e)}", (255, 100, 100))
+            self.add_chat_message("Please enter the MP3 path manually", COLOR_STATUS)
 
     def on_upload_mp3(self, sender, app_data):
         """Handle MP3 file upload."""
@@ -546,103 +541,59 @@ class ReaperAIApp:
             self.add_chat_message("Please enter an MP3 file path", (255, 100, 100))
 
     def audio_to_midi_notes_with_tempo(self, file_path):
-        """Create MIDI transcription without audio processing libraries."""
+        """Transcribe audio to MIDI notes using basic-pitch via Python 3.11 subprocess."""
         try:
-            self.add_chat_message("Processing MP3 file...", COLOR_STATUS)
-            
-            # Get basic file info
-            file_size = Path(file_path).stat().st_size
-            file_name = Path(file_path).name
-            
-            # Estimate duration and tempo from file properties
-            estimated_duration = min(120, max(15, file_size / 50000))  # Rough estimate
-            tempo = 90 + (file_size % 60)  # 90-149 BPM range
-            
-            self.add_chat_message(f"File: {file_name}", COLOR_STATUS)
-            self.add_chat_message(f"Estimated duration: {estimated_duration:.1f} seconds", COLOR_STATUS)
-            self.add_chat_message(f"Estimated tempo: {tempo} BPM", COLOR_STATUS)
-            
-            self.add_chat_message("Creating transcription pattern...", COLOR_STATUS)
-            
-            # Create a transcription that simulates real musical analysis
-            notes = []
-            
-            # Generate a more realistic musical pattern based on file characteristics
-            # Use file size hash to create variation
-            seed = sum(ord(c) for c in file_name) % 1000
-            
-            # Create musical phrases that feel like real transcription
-            total_beats = int(estimated_duration * tempo / 60)
-            beats_per_phrase = 8  # 2-measure phrases
-            num_phrases = total_beats // beats_per_phrase
-            
-            # Define musical scales for variety
-            scales = {
-                'major': [0, 2, 4, 5, 7, 9, 11],  # Major scale intervals
-                'minor': [0, 2, 3, 5, 7, 8, 10],  # Minor scale intervals
-                'pentatonic': [0, 2, 4, 7, 9],     # Pentatonic scale
-            }
-            
-            for phrase_idx in range(num_phrases):
-                # Choose scale based on file characteristics
-                scale_type = list(scales.keys())[seed % len(scales)]
-                scale_intervals = scales[scale_type]
-                root_note = 60 + ((seed + phrase_idx) % 12)  # Different root per phrase
-                
-                start_beat = phrase_idx * beats_per_phrase
-                
-                # Create melody within this phrase
-                for beat in range(beats_per_phrase):
-                    # Generate melody notes
-                    if beat % 2 == 0:  # Every other beat
-                        scale_degree = (seed + phrase_idx + beat) % len(scale_intervals)
-                        midi_note = root_note + scale_intervals[scale_degree]
-                        
-                        # Add some variation
-                        if beat % 4 == 0:
-                            midi_note += 12  # Octave up occasionally
-                        
-                        notes.append({
-                            "pitch": midi_note,
-                            "start_beat": start_beat + beat,
-                            "length_beats": 1.0,
-                            "velocity": 80 + (seed % 20),
-                            "channel": 0
-                        })
-                    
-                    # Add harmony notes
-                    if beat % 4 == 0:  # Every 4th beat
-                        harmony_note = root_note + scale_intervals[0]  # Root note
-                        notes.append({
-                            "pitch": harmony_note,
-                            "start_beat": start_beat + beat,
-                            "length_beats": 2.0,
-                            "velocity": 60,
-                            "channel": 1
-                        })
-                
-                # Progress update
-                if phrase_idx % 2 == 0:
-                    progress = ((phrase_idx + 1) / num_phrases) * 100
-                    self.add_chat_message(f"Transcription progress: {int(progress)}%", COLOR_STATUS)
-            
-            # Add some bass line
-            for beat in range(0, total_beats, 4):
-                bass_note = 36 + ((seed + beat // 4) % 12)
-                notes.append({
-                    "pitch": bass_note,
-                    "start_beat": beat,
-                    "length_beats": 4.0,
-                    "velocity": 100,
-                    "channel": 2
-                })
-            
-            self.add_chat_message(f"Created transcription with {len(notes)} notes", COLOR_USER)
-            self.add_chat_message("Note: Pattern based on file characteristics", COLOR_STATUS)
+            # Find the Python 3.11 venv
+            worker_python = Path(__file__).parent / ".venv311" / "Scripts" / "python.exe"
+            worker_script = Path(__file__).parent / "transcribe_worker.py"
+
+            if not worker_python.exists():
+                self.add_chat_message(
+                    "Python 3.11 venv not found. Run: py -3.11 -m venv .venv311 && .venv311\\Scripts\\pip install basic-pitch librosa",
+                    (255, 100, 100),
+                )
+                return None
+
+            self.add_chat_message("Starting polyphonic transcription...", COLOR_STATUS)
+
+            # Run the worker script in the 3.11 venv
+            result = subprocess.run(
+                [str(worker_python), str(worker_script), file_path],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            # Show status messages from stderr
+            if result.stderr:
+                for line in result.stderr.strip().splitlines():
+                    if line.startswith("STATUS:"):
+                        self.add_chat_message(line[7:], COLOR_STATUS)
+
+            if result.returncode != 0:
+                self.add_chat_message(f"Transcription failed: {result.stderr}", (255, 100, 100))
+                return None
+
+            # Parse last line only — TF warnings may pollute earlier lines
+            stdout_lines = result.stdout.strip().splitlines()
+            if not stdout_lines:
+                self.add_chat_message("Transcription returned no output", (255, 100, 100))
+                return None
+            data = json.loads(stdout_lines[-1])
+            if "error" in data:
+                self.add_chat_message(f"Transcription error: {data['error']}", (255, 100, 100))
+                return None
+
+            notes = data["notes"]
+            tempo = data["tempo"]
+
+            if not notes:
+                self.add_chat_message("No notes detected in audio.", (255, 100, 100))
+                return None
+
+            self.add_chat_message(f"Transcription complete: {len(notes)} notes (polyphonic)", COLOR_USER)
             return notes, tempo
-            
+
         except Exception as e:
-            self.add_chat_message(f"Error: {str(e)}", (255, 100, 100))
+            self.add_chat_message(f"Transcription error: {str(e)}", (255, 100, 100))
             return None
 
     async def transcribe_mp3_to_midi(self):
@@ -656,7 +607,9 @@ class ReaperAIApp:
             
             # Convert audio to MIDI notes
             self.add_chat_message("Analyzing audio...", COLOR_STATUS)
-            notes_and_tempo = self.audio_to_midi_notes_with_tempo(self.uploaded_file_path)
+            notes_and_tempo = await asyncio.to_thread(
+                self.audio_to_midi_notes_with_tempo, self.uploaded_file_path
+            )
             
             if not notes_and_tempo:
                 self.add_chat_message("Failed to extract notes from audio", (255, 100, 100))
@@ -716,6 +669,14 @@ class ReaperAIApp:
             if notes_result.get("ok"):
                 self.add_chat_message(f"MP3 converted to MIDI with {len(notes)} notes", COLOR_USER)
                 self.set_status("MIDI conversion complete")
+                # Add transcription context to AI conversation so it knows about the notes
+                transcription_summary = (
+                    f"[System: MP3 file '{Path(self.uploaded_file_path).name}' was transcribed to MIDI. "
+                    f"Track index: {midi_track}, tempo: {detected_tempo} BPM, "
+                    f"{len(notes)} notes were added. "
+                    f"Notes data: {json.dumps(notes)}"
+                )
+                self.messages.append({"role": "user", "content": transcription_summary})
             else:
                 self.add_chat_message(f"Failed to add notes: {notes_result.get('error')}", (255, 100, 100))
                 
