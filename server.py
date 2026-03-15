@@ -12,12 +12,14 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from backboard import BackboardClient
 from backboard.models import ToolOutput
 
 import reaper_tools
+from audio_upload_gui import upload_handler
 from app import (
     load_dotenv,
     load_session,
@@ -305,3 +307,66 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         pass
+
+
+# --- Audio Upload Endpoints ---
+
+@app.post("/api/upload-audio")
+async def upload_audio(file: UploadFile = File(...)):
+    """Upload an audio file."""
+    try:
+        metadata = await upload_handler.save_upload(file)
+        return {"success": True, "metadata": metadata}
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.get("/api/uploads")
+async def list_uploads():
+    """List all uploaded audio files."""
+    try:
+        uploads = upload_handler.list_uploads()
+        return {"success": True, "uploads": uploads}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.get("/api/uploads/{filename}")
+async def get_upload_info(filename: str):
+    """Get metadata for a specific uploaded file."""
+    try:
+        metadata = upload_handler.get_upload_info(filename)
+        if metadata:
+            return {"success": True, "metadata": metadata}
+        else:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": "File not found"}
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.delete("/api/uploads/{filename}")
+async def delete_upload(filename: str):
+    """Delete an uploaded audio file."""
+    try:
+        deleted = upload_handler.delete_upload(filename)
+        if deleted:
+            return {"success": True, "message": "File deleted successfully"}
+        else:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": "File not found"}
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )

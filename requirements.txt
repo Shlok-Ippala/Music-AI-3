@@ -1,2 +1,8 @@
+fastapi
+uvicorn
+websockets
+backboard
+python-dotenv
+aiofiles
 backboard-sdk>=1.5.5
 httpx>=0.25.0
