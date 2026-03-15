@@ -1,9 +1,12 @@
 {
-  "mcpServers": {
-    "reaper": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["C:/Users/shlok/Personal Projects/Music AI 3/reaper-mcp/reaper_mcp_server.py"]
-    }
-  }
+ "mcpServers": {
+   "reaper": {
+     "type": "stdio",
+     "command": "/Users/sasha/PycharmProjects/Music-AI-3/.venv/bin/python",
+     "args": ["/Users/sasha/PycharmProjects/Music-AI-3/reaper-mcp/reaper_mcp_server.py"],
+     "env": {
+       "REAPER_BRIDGE_DIR": "/Users/sasha/Library/Application Support/REAPER/Scripts/mcp_bridge_data"
+     }
+   }
+ }
 }

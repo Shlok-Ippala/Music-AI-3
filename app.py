@@ -6,6 +6,7 @@ Side panel overlay using Dear PyGui + OpenAI-compatible API to control REAPER DA
 """
 
 import os
+import sys
 import json
 import asyncio
 import inspect
@@ -14,6 +15,8 @@ import threading
 import ctypes
 import queue
 from pathlib import Path
+
+IS_MAC = sys.platform == "darwin"
 
 import dearpygui.dearpygui as dpg
 from openai import AsyncOpenAI
@@ -313,7 +316,7 @@ TOOL_DESCRIPTIONS = {
 }
 
 
-async def run_agentic_loop(client, messages, tool_schemas, status_callback=None, chat_callback=None):
+async def run_agentic_loop(client, messages, tool_schemas, status_callback=None, chat_callback=None, should_stop=None):
     """Run the OpenAI tool-calling loop. Modifies messages list in-place."""
     response = await client.chat.completions.create(
         model=MODEL,
@@ -325,6 +328,8 @@ async def run_agentic_loop(client, messages, tool_schemas, status_callback=None,
     messages.append(msg)
 
     while msg.tool_calls:
+        if should_stop and should_stop():
+            raise asyncio.CancelledError("Stopped by user")
         if status_callback:
             status_callback(f"Executing {len(msg.tool_calls)} tool(s)...")
 
@@ -368,15 +373,27 @@ COLOR_USER = (130, 180, 255)
 COLOR_AI = (220, 220, 220)
 COLOR_STATUS = (150, 150, 150)
 COLOR_HEADER = (100, 150, 255)
-PANEL_WIDTH = 380
+COLOR_TOOL = (120, 120, 140)
+PANEL_WIDTH = 420
 PANEL_MIN_WIDTH = 300
+CHAT_WRAP = 380
 
 
 def get_screen_size():
-    """Get screen dimensions using ctypes (Windows)."""
-    user32 = ctypes.windll.user32
-    user32.SetProcessDPIAware()
-    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    """Get screen dimensions, cross-platform."""
+    if hasattr(ctypes, 'windll'):
+        user32 = ctypes.windll.user32
+        user32.SetProcessDPIAware()
+        return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    try:
+        import subprocess
+        out = subprocess.check_output(["python3", "-c",
+            "import tkinter; r=tkinter.Tk(); print(r.winfo_screenwidth(), r.winfo_screenheight()); r.destroy()"],
+            stderr=subprocess.DEVNULL)
+        w, h = out.decode().strip().split()
+        return int(w), int(h)
+    except Exception:
+        return 1920, 1080
 
 
 class ReaperAIApp:
@@ -386,8 +403,10 @@ class ReaperAIApp:
         self.tool_schemas = None
         self.async_loop = None
         self.is_processing = False
+        self.stop_requested = False
         self.message_count = 0
         self.ui_queue = queue.Queue()
+        self.status_message = None
 
     def add_chat_message(self, text, color, prefix=""):
         """Thread-safe: queue a chat message for the main thread."""
@@ -413,17 +432,19 @@ class ReaperAIApp:
                 self.message_count += 1
                 full_text = f"{prefix}{text}" if prefix else text
                 dpg.add_text(
-                    full_text, parent="chat_history", wrap=PANEL_WIDTH - 40,
+                    full_text, parent="chat_history", wrap=CHAT_WRAP,
                     color=color, tag=f"msg_{self.message_count}",
                 )
                 dpg.add_spacer(height=5, parent="chat_history")
-                dpg.set_y_scroll("chat_history", dpg.get_y_scroll_max("chat_history") + 100)
+                dpg.set_y_scroll("chat_history", -1)
             elif cmd[0] == "status":
                 dpg.set_value("status_text", cmd[1])
             elif cmd[0] == "input_enabled":
                 enabled = cmd[1]
                 dpg.configure_item("send_btn", enabled=enabled)
                 dpg.configure_item("input_field", enabled=enabled)
+                dpg.configure_item("stop_btn", enabled=not enabled)
+                dpg.configure_item("clear_btn", enabled=enabled)
                 if enabled:
                     dpg.focus_item("input_field")
 
@@ -442,6 +463,7 @@ class ReaperAIApp:
 
         # Process in background
         self.is_processing = True
+        self.stop_requested = False
         self._set_input_enabled(False)
         self.set_status("Thinking...")
 
@@ -465,10 +487,15 @@ class ReaperAIApp:
             response = await run_agentic_loop(
                 self.client, self.messages, self.tool_schemas,
                 status_callback=self.set_status,
-                chat_callback=lambda msg: self.add_chat_message(msg, COLOR_STATUS),
+                chat_callback=lambda msg: self.add_chat_message(msg, COLOR_TOOL),
+                should_stop=lambda: self.stop_requested,
             )
 
-            self.add_chat_message(response, COLOR_AI, prefix="AI: ")
+            self.add_chat_message(response, COLOR_AI, prefix="Reaper AI: ")
+            self.set_status("Ready")
+
+        except asyncio.CancelledError:
+            self.add_chat_message("Stopped.", COLOR_STATUS)
             self.set_status("Ready")
 
         except Exception as e:
@@ -479,6 +506,26 @@ class ReaperAIApp:
         finally:
             self.is_processing = False
             self._set_input_enabled(True)
+
+    def clear_chat(self):
+        """Clear chat history and reset conversation."""
+        if self.is_processing:
+            return
+        for i in range(self.message_count):
+            tag = f"msg_{i + 1}"
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        self.message_count = 0
+        self.messages = [{"role": "system", "content": build_system_prompt()}]
+        if self.status_message:
+            self.add_chat_message(self.status_message[0], self.status_message[1])
+        self.set_status("Chat cleared")
+
+    def on_stop(self):
+        """Request cancellation of the current generation."""
+        if self.is_processing:
+            self.stop_requested = True
+            self.set_status("Stopping...")
 
     def on_input_enter(self, sender, app_data):
         """Handle Enter key in input field."""
@@ -505,6 +552,8 @@ class ReaperAIApp:
         self.add_chat_message(
             f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}", COLOR_STATUS
         )
+        self.status_message = (f"Connected. {len(self.tool_schemas)} REAPER tools loaded. Model: {MODEL}", COLOR_STATUS
+        )
         self._set_input_enabled(True)
         return True
 
@@ -519,7 +568,10 @@ class ReaperAIApp:
         # Create the main window content
         with dpg.window(tag="primary", no_title_bar=True, no_move=True, no_resize=True):
             # Header
-            dpg.add_text("REAPER AI", color=COLOR_HEADER)
+            with dpg.group(horizontal=True):
+                dpg.add_text("REAPER AI", color=COLOR_HEADER)
+                dpg.add_button(tag="clear_btn", label="Clear", callback=self.clear_chat, small=True)
+                dpg.add_button(tag="stop_btn", label="Stop Generating", callback=self.on_stop, small=True, enabled=False)
             dpg.add_separator()
 
             # Chat history (scrollable)
@@ -547,14 +599,16 @@ class ReaperAIApp:
                 )
 
         # Viewport setup
+        y_pos = 25 if IS_MAC else 0
+        h_offset = 100 if IS_MAC else 40
         dpg.create_viewport(
             title="REAPER AI",
             width=PANEL_WIDTH,
-            height=screen_h - 40,
+            height=screen_h - h_offset,
             x_pos=screen_w - PANEL_WIDTH - 10,
-            y_pos=0,
+            y_pos=y_pos,
             always_on_top=True,
-            resizable=False,
+            resizable=True,
             min_width=PANEL_MIN_WIDTH,
             clear_color=COLOR_BG,
         )

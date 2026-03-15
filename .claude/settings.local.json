@@ -1,12 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(REQ_FILE=\"$APPDATA/REAPER/Scripts/mcp_bridge_data/request_2.json\")",
+      "Bash(REQ_FILE=\"$HOME/Library/Application Support/REAPER/Scripts/mcp_bridge_data/request_2.json\")",
       "Bash(\"$REQ_FILE\")",
-      "Read(//c/Users/shlok/Personal Projects/Music AI/$APPDATA/REAPER/Scripts/mcp_bridge_data/**)",
+      "Read(/Users/sasha/Library/Application Support/REAPER/Scripts/mcp_bridge_data/**)",
       "Bash(pip show:*)",
       "Bash(python:*)",
-      "Bash(ls -lt \"C:/Users/shlok/.claude/debug/\"*.txt)",
       "Bash(claude mcp:*)",
       "mcp__reaper__insert_track",
       "mcp__reaper__get_tempo",
