@@ -1,1 +1,14 @@
 .env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+node_modules/
+frontend/dist/
+.session.json
+mcp_bridge_data/
+.railtracks/
+plugins-store/
+song-to-midi/
+reaper-bridge/

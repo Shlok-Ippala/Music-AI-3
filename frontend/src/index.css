@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-main: #0D0D0F;
+  --color-bg-panel: #141416;
+  --color-bg-panelLight: #1A1A1E;
+  --color-accent-violet: #7C3AED;
+  --color-accent-cyan: #06B6D4;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #A1A1AA;
+  
+  --font-sans: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  
+  --background-image-noise: url('/noise.png');
+  
+  --animate-pulse-slow: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-slide-in: slideIn 0.3s ease-out forwards;
+  --animate-ripple: ripple 0.6s linear;
+}
+
+@keyframes slideIn {
+  0% { transform: translateX(-10px); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes ripple {
+  0% { transform: scale(0); opacity: 0.4; }
+  100% { transform: scale(3); opacity: 0; }
+}
+
+@layer base {
+  body {
+    @apply bg-bg-main text-text-primary font-sans antialiased overflow-hidden selection:bg-accent-violet/30;
+  }
+}
+
+@layer utilities {
+  .noise-bg {
+    @apply bg-noise bg-repeat opacity-[0.03] pointer-events-none absolute inset-0 mix-blend-overlay;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-white/10 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-white/20;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 4px;
+}
