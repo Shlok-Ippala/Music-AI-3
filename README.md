@@ -1,4 +1,4 @@
-# Music AI
+# Reaper AI
 
 An AI assistant that lives inside REAPER and lets you build full tracks by just talking to it.
 
