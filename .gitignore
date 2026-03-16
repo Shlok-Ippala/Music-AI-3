@@ -1,1 +1,30 @@
+# Environment
 .env
+.env.*
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# App runtime data
+plugins-store/
+song-to-midi/
+.session.json
+
+# Claude
+.claude/
+.mcp.json

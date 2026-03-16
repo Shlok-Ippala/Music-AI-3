@@ -4,227 +4,409 @@
 <meta charset="UTF-8">
 <title>REAPER AI</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+:root {
+  --bg: #0f0f13;
+  --bg2: #17171d;
+  --bg3: #1e1e26;
+  --border: #2a2a35;
+  --accent: #7c5af0;
+  --accent2: #9b6bff;
+  --text: #e8e6f2;
+  --text-dim: #8884a0;
+  --text-muted: #4a4860;
+  --grad-l: #6e9bff;
+  --grad-r: #d78cff;
+  --user-bg: #1e1e2e;
+  --user-color: #c8c0f0;
+  --ai-color: #e0ddf5;
+  --error: #ff7b7b;
+  --tool-color: #5a5870;
+}
+
 body {
-    background: #1a1a20;
-    color: #ddd;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
-    font-size: 13px;
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
+/* ── Header ── */
 #header {
-    padding: 10px 14px;
-    border-bottom: 1px solid #2e2e38;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
 }
 
-#header h1 {
-    color: #6496ff;
-    font-size: 14px;
-    font-weight: 600;
-    flex: 1;
+#header-title {
+  font-size: 13px;
+  font-weight: 600;
+  background: linear-gradient(90deg, var(--grad-l), var(--grad-r));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  flex: 1;
 }
 
-.btn {
-    background: #252530;
-    color: #999;
-    border: 1px solid #3a3a48;
-    border-radius: 4px;
-    padding: 3px 10px;
-    cursor: pointer;
-    font-size: 11px;
-    font-family: inherit;
-    transition: background 0.1s;
+#model-label {
+  font-size: 10px;
+  color: var(--text-muted);
 }
-.btn:hover:not(:disabled) { background: #2e2e3e; color: #bbb; }
-.btn:disabled { opacity: 0.35; cursor: default; }
 
-#stop-btn { color: #ff7b7b; border-color: #ff7b7b44; }
-#stop-btn:hover:not(:disabled) { background: #2e1e1e; }
+.hbtn {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.hbtn:hover:not(:disabled) { background: var(--bg3); color: var(--text-dim); }
+.hbtn:disabled { opacity: 0.3; cursor: default; }
+#stop-btn { color: var(--error); border-color: #ff7b7b33; }
+#stop-btn:hover:not(:disabled) { background: #1e1010; }
 
+/* ── Chat area ── */
 #chat {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scroll-behavior: smooth;
 }
-#chat::-webkit-scrollbar { width: 4px; }
+#chat::-webkit-scrollbar { width: 3px; }
 #chat::-webkit-scrollbar-track { background: transparent; }
-#chat::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+#chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── Greeting ── */
+#greeting {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px 80px;
+  gap: 12px;
+  text-align: center;
+  animation: fadeIn 0.4s ease;
+}
+#greeting h2 {
+  font-size: 26px;
+  font-weight: 600;
+  background: linear-gradient(90deg, var(--grad-l) 0%, var(--grad-r) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.2;
+}
+#greeting p {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 260px;
+  line-height: 1.6;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Messages ── */
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 0;
+  animation: msgIn 0.2s ease;
+}
+@keyframes msgIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
 .msg-label {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    margin-bottom: 3px;
-    text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 .msg-text {
-    line-height: 1.55;
-    white-space: pre-wrap;
-    word-break: break-word;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.msg-user .msg-label { color: #5a8aee; }
-.msg-user .msg-text  { color: #c0d0ff; }
+.msg-user .msg-label { color: #6e9bff; }
+.msg-user .msg-text  { color: var(--user-color); background: var(--user-bg); border-radius: 10px; padding: 8px 12px; display: inline-block; max-width: 90%; }
 
-.msg-ai .msg-label { color: #5a9e5a; }
-.msg-ai .msg-text  { color: #e0e0e0; }
+.msg-ai .msg-label { color: #9b6bff; }
+.msg-ai .msg-text  { color: var(--ai-color); }
 
-.msg-tool   .msg-text { color: #555; font-style: italic; font-size: 12px; }
-.msg-status .msg-text { color: #666; font-size: 12px; }
-.msg-error  .msg-text { color: #ff7b7b; }
+.msg-tool .msg-text   { color: var(--tool-color); font-style: italic; font-size: 11px; padding: 2px 0; }
+.msg-status .msg-text { color: var(--text-muted); font-size: 11px; padding: 2px 0; }
+.msg-error .msg-text  { color: var(--error); }
 
+/* ── Status bar ── */
 #status-bar {
-    padding: 4px 14px;
-    font-size: 11px;
-    color: #555;
-    border-top: 1px solid #222;
-    flex-shrink: 0;
+  padding: 3px 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
+/* ── Input area ── */
 #input-area {
-    padding: 10px 14px;
-    border-top: 1px solid #2e2e38;
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-    flex-shrink: 0;
+  padding: 10px 16px 14px;
+  flex-shrink: 0;
 }
+
+#input-pill {
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 6px 6px 6px 14px;
+  transition: border-color 0.15s;
+}
+#input-pill:focus-within { border-color: var(--accent); }
 
 #input {
-    flex: 1;
-    background: #22222c;
-    border: 1px solid #3a3a48;
-    border-radius: 6px;
-    color: #ddd;
-    padding: 8px 10px;
-    font-size: 13px;
-    font-family: inherit;
-    resize: none;
-    min-height: 36px;
-    max-height: 140px;
-    overflow-y: auto;
-    line-height: 1.45;
-    outline: none;
-    transition: border-color 0.15s;
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  resize: none;
+  min-height: 22px;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.5;
+  padding: 2px 0;
+  align-self: center;
 }
-#input:focus { border-color: #4a6ab866; }
-#input::placeholder { color: #444; }
+#input::placeholder { color: var(--text-muted); }
 #input:disabled { opacity: 0.5; }
+#input::-webkit-scrollbar { width: 2px; }
+#input::-webkit-scrollbar-thumb { background: var(--border); }
+
+.pill-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 5px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  color: var(--text-muted);
+}
+.pill-btn:hover:not(:disabled) { background: var(--bg2); color: var(--text-dim); }
+.pill-btn:disabled { opacity: 0.3; cursor: default; }
+
+#plus-btn {
+  width: 30px;
+  height: 30px;
+  font-size: 18px;
+  font-weight: 300;
+  line-height: 1;
+  margin-right: 2px;
+}
 
 #send-btn {
-    background: #2a3e6e;
-    color: #8ab0ff;
-    border-color: #3a5090;
-    padding: 8px 14px;
-    align-self: flex-end;
-    flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 50%;
+  opacity: 0.4;
+  transition: opacity 0.15s, background 0.15s;
 }
-#send-btn:hover:not(:disabled) { background: #3a5090; }
+#send-btn.active { opacity: 1; }
+#send-btn:hover:not(:disabled).active { background: var(--accent2); }
+
+/* SVG icons */
+.icon { display: block; }
+
+/* ── Transcribing indicator ── */
+#transcribing-bar {
+  display: none;
+  font-size: 11px;
+  color: var(--accent2);
+  padding: 4px 16px;
+  animation: pulse 1.4s infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
 </head>
 <body>
 
 <div id="header">
-    <h1>REAPER AI</h1>
-    <button class="btn" id="clear-btn" onclick="clearChat()">Clear</button>
-    <button class="btn" id="stop-btn" onclick="stopGen()" disabled>Stop</button>
+  <span id="header-title">REAPER AI</span>
+  <span id="model-label"></span>
+  <button class="hbtn" id="clear-btn" onclick="clearChat()">Clear</button>
+  <button class="hbtn" id="stop-btn" onclick="stopGen()" disabled>Stop</button>
 </div>
 
-<div id="chat"></div>
+<div id="chat">
+  <div id="greeting">
+    <h2>How can I help?</h2>
+    <p>Ask me to compose tracks, add instruments, mix, or drop an MP3 to transcribe it to MIDI.</p>
+  </div>
+</div>
 
 <div id="status-bar">Starting up...</div>
+<div id="transcribing-bar">&#9835; Transcribing audio to MIDI...</div>
 
 <div id="input-area">
-    <textarea id="input" placeholder="Type your message... (Shift+Enter for new line)"
-        rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)" disabled></textarea>
-    <button class="btn" id="send-btn" onclick="sendMessage()" disabled>Send</button>
+  <div id="input-pill">
+    <button class="pill-btn" id="plus-btn" onclick="pickFile()" title="Browse MP3 file">+</button>
+    <textarea id="input" placeholder="Ask anything..." rows="1"
+      onkeydown="handleKey(event)" oninput="onInput(this)" disabled></textarea>
+    <button class="pill-btn" id="send-btn" onclick="sendMessage()" disabled title="Send">
+      <svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M8 12V4M4 8l4-4 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
 </div>
 
 <script>
+let _hasMessages = false;
+let _currentInput = '';
+
 function addMessage(role, text) {
-    const chat = document.getElementById('chat');
-    const div = document.createElement('div');
-    div.className = `msg-${role}`;
-    const labels = { user: 'You', ai: 'Reaper AI' };
-    const label = labels[role];
-    if (label) {
-        div.innerHTML = `<div class="msg-label">${label}</div><div class="msg-text">${esc(text)}</div>`;
-    } else {
-        div.innerHTML = `<div class="msg-text">${esc(text)}</div>`;
-    }
-    chat.appendChild(div);
-    chat.scrollTop = chat.scrollHeight;
+  if (!_hasMessages) {
+    _hasMessages = true;
+    const g = document.getElementById('greeting');
+    if (g) { g.style.transition = 'opacity 0.2s'; g.style.opacity = '0'; setTimeout(() => g.remove(), 200); }
+  }
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  div.className = `msg msg-${role}`;
+  const labels = { user: 'You', ai: 'Reaper AI' };
+  const label = labels[role];
+  if (label) {
+    div.innerHTML = `<div class="msg-label">${label}</div><div class="msg-text">${esc(text)}</div>`;
+  } else {
+    div.innerHTML = `<div class="msg-text">${esc(text)}</div>`;
+  }
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
 }
 
 function clearMessages() {
-    document.getElementById('chat').innerHTML = '';
+  _hasMessages = false;
+  const chat = document.getElementById('chat');
+  chat.innerHTML = '';
+  // Re-add greeting
+  const g = document.createElement('div');
+  g.id = 'greeting';
+  g.innerHTML = '<h2>How can I help?</h2><p>Ask me to compose tracks, add instruments, mix, or drop an MP3 to transcribe it to MIDI.</p>';
+  chat.appendChild(g);
 }
 
 function setStatus(text) {
-    document.getElementById('status-bar').textContent = text;
+  document.getElementById('status-bar').textContent = text;
+}
+
+function setModelLabel(text) {
+  document.getElementById('model-label').textContent = text;
 }
 
 function setProcessing(processing) {
-    document.getElementById('input').disabled = processing;
-    document.getElementById('send-btn').disabled = processing;
-    document.getElementById('stop-btn').disabled = !processing;
-    document.getElementById('clear-btn').disabled = processing;
-    if (!processing) setTimeout(() => document.getElementById('input').focus(), 50);
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send-btn');
+  const plusBtn = document.getElementById('plus-btn');
+  input.disabled = processing;
+  sendBtn.disabled = processing;
+  plusBtn.disabled = processing;
+  document.getElementById('stop-btn').disabled = !processing;
+  document.getElementById('clear-btn').disabled = processing;
+  if (!processing) {
+    updateSendBtn();
+    setTimeout(() => input.focus(), 50);
+  }
 }
 
-function clearChat() {
-    pywebview.api.clear();
+function setTranscribing(on) {
+  document.getElementById('transcribing-bar').style.display = on ? 'block' : 'none';
 }
 
-function stopGen() {
-    pywebview.api.stop();
+function clearChat() { pywebview.api.clear(); }
+function stopGen() { pywebview.api.stop(); }
+
+function pickFile() {
+  if (typeof pywebview !== 'undefined') {
+    pywebview.api.open_file().then(filePath => {
+      if (filePath) {
+        const input = document.getElementById('input');
+        input.value = filePath;
+        onInput(input);
+        updateSendBtn();
+      }
+    });
+  }
 }
 
 function sendMessage() {
-    const input = document.getElementById('input');
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = '';
-    autoResize(input);
-    addMessage('user', text);
-    setProcessing(true);
-    pywebview.api.send_message(text);
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  onInput(input);
+  updateSendBtn();
+  addMessage('user', text);
+  setProcessing(true);
+  pywebview.api.send_message(text);
 }
 
 function handleKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-    }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
 }
 
-function autoResize(el) {
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+function onInput(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  _currentInput = el.value.trim();
+  updateSendBtn();
+}
+
+function updateSendBtn() {
+  const btn = document.getElementById('send-btn');
+  if (_currentInput.length > 0) {
+    btn.classList.add('active');
+  } else {
+    btn.classList.remove('active');
+  }
 }
 
 function esc(text) {
-    return String(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>');
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
 }
 
 window.addEventListener('load', () => {
-    document.getElementById('input').focus();
+  document.getElementById('input').focus();
 });
 </script>
 </body>
